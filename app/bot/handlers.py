@@ -26,13 +26,16 @@ router = Router(name="users")
 async def start(message: Message, users: UserService) -> None:
     if message.from_user:
         await users.register(message.from_user)
+    from app.bot.menu import home_keyboard
+
     await message.answer(
         "Привет! Отправь ссылку на YouTube, VK, Rutube, TikTok, "
         "Яндекс.Музыку, Spotify, Instagram или Pinterest. "
         "Можешь также написать название песни или исполнителя. "
         "Пришли голосовое, аудио, видео или кружок для распознавания музыки. "
         "Аудиофрагмент для распознавания отправляется сервису AudD. "
-        "Скачивай только контент, на использование которого у тебя есть права."
+        "Скачивай только контент, на использование которого у тебя есть права.",
+        reply_markup=home_keyboard(),
     )
 
 async def dispatch_download(

@@ -74,5 +74,6 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="📢 Спонсорские каналы", callback_data="adm:channels")],
         [InlineKeyboardButton(text="📝 Рекламная подпись", callback_data="adm:ads")],
         [InlineKeyboardButton(text="📈 Рекламные кампании", callback_data="adm:campaigns")],
+        [InlineKeyboardButton(text="💰 Доходы и расходы", callback_data="adm:economics")],
         [InlineKeyboardButton(text="📨 Рассылка", callback_data="adm:broadcast")],
     ])
