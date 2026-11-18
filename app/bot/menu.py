@@ -107,7 +107,7 @@ async def fragment_search(
     if not matches:
         await status.edit_text("Совпадений не найдено. Попробуйте более длинную фразу.")
         return
-    token = await create_search(redis, message.from_user.id, matches)
+    token = await create_search(redis, message.from_user.id, matches, query=f"Фраза: {query}")
     await status.edit_text(
         "🔍 Возможные совпадения (точность не гарантируется):",
         reply_markup=search_keyboard(token, matches),

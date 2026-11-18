@@ -157,7 +157,7 @@ async def recognize_message(
                 text + "\nПодходящей общедоступной записи пока не найдено."
             )
             return
-        search_token = await create_search(redis, user_id, matches)
+        search_token = await create_search(redis, user_id, matches, query=f"{result.artist} — {result.title}")
         await status.edit_text(
             text + "\nВот похожие записи из поиска:",
             reply_markup=search_keyboard(search_token, matches),

@@ -21,48 +21,54 @@ def format_keyboard(token: str, *, allow_video: bool = True) -> InlineKeyboardMa
 
 def search_keyboard(
     token: str, results: list[SearchResult] | tuple[SearchResult, ...],
-    *, page: int = 0, selected: set[int] | None = None,
+    *, page: int = 0, states: dict[int, str] | None = None,
 ) -> InlineKeyboardMarkup:
-    """Up to 10 results, five per page; all remain available for 30 minutes."""
+    """One compact numbered action row per track; no batch download controls."""
     from app.services.search_sessions import PAGE_SIZE
 
-    selected = selected or set()
+    if not results:
+        return InlineKeyboardMarkup(inline_keyboard=[])
+    states = states or {}
     page = max(0, min(page, (len(results) - 1) // PAGE_SIZE))
     rows = []
-    first = page * PAGE_SIZE
-    for index, result in enumerate(results[first:first + PAGE_SIZE], start=first):
-        label = f"{index + 1}. {result.title}"
-        if result.artist:
-            label += f" — {result.artist}"
-        downloaded = index in selected
+    for index in range(page * PAGE_SIZE, min((page + 1) * PAGE_SIZE, len(results))):
+        state = states.get(index)
+        status_icon = (
+            "✅" if state == "success" else
+            "⏳" if state in {"queued", "processing"} else "🎧"
+        )
         rows.append([
             InlineKeyboardButton(
-                text=("🔁 " if downloaded else "🎧 ") + label[:38],
+                text=f"{status_icon}  {index + 1:02d}",
                 callback_data=f"find:{token}:{index}",
             ),
-            InlineKeyboardButton(text="💾", callback_data=f"stash:{token}:{index}"),
-            InlineKeyboardButton(text="➕", callback_data=f"pls:{token}:{index}"),
+            InlineKeyboardButton(
+                text="⭐ В избранное", callback_data=f"stash:{token}:{index}",
+            ),
+            InlineKeyboardButton(
+                text="➕ Плейлист", callback_data=f"pls:{token}:{index}",
+            ),
         ])
     if len(results) > PAGE_SIZE:
         nav = []
         if page > 0:
             nav.append(InlineKeyboardButton(
-                text="⬅️ Назад", callback_data=f"searchpage:{token}:{page - 1}",
+                text="‹ Назад", callback_data=f"searchpage:{token}:{page - 1}",
             ))
         nav.append(InlineKeyboardButton(
-            text=f"{page + 1}/{(len(results) + PAGE_SIZE - 1) // PAGE_SIZE}",
+            text=f"{page + 1} / {(len(results) + PAGE_SIZE - 1) // PAGE_SIZE}",
             callback_data=f"searchpage:{token}:{page}",
         ))
-        if first + PAGE_SIZE < len(results):
+        if (page + 1) * PAGE_SIZE < len(results):
             nav.append(InlineKeyboardButton(
-                text="Вперед ➡️", callback_data=f"searchpage:{token}:{page + 1}",
+                text="Далее ›", callback_data=f"searchpage:{token}:{page + 1}",
             ))
         rows.append(nav)
-    remaining = max(0, len(results) - len(selected))
-    if remaining:
+    if any(states.get(i) in {"queued", "processing"} for i in range(
+        page * PAGE_SIZE, min((page + 1) * PAGE_SIZE, len(results))
+    )):
         rows.append([InlineKeyboardButton(
-            text=f"📥 Скачать следующие {min(remaining, 3)}",
-            callback_data=f"findall:{token}",
+            text="↻ Обновить статусы", callback_data=f"searchpage:{token}:{page}",
         )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
