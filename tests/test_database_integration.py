@@ -3,13 +3,20 @@ import os
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 
-from app.core.database import session_factory
+from app.core.database import engine, session_factory
 from app.models import User
 from app.services.library import TrackLibrary
 from app.services.premium import InvalidPayment, PremiumService
 from app.services.repository import Repository
 from app.services.urls import parse_media_url
+
+@pytest_asyncio.fixture(scope="module", loop_scope="module", autouse=True)
+async def dispose_db_pool():
+    yield
+    await engine.dispose()
+
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_DB_TESTS") != "1",
@@ -17,7 +24,7 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_stars_checkout_payment_and_idempotent_grant():
     user_id = 10_000_000_001
     async with session_factory.begin() as session:
