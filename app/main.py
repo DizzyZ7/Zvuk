@@ -3,7 +3,7 @@ import logging
 
 from aiogram import Dispatcher
 from aiogram.fsm.storage.redis import RedisStorage
-from app.bot import admin, campaigns, handlers, legal, library, premium, recognition
+from app.bot import admin, campaigns, handlers, legal, library, menu, playlists, premium, recognition
 from app.bot.middlewares import SponsorMiddleware, ThrottleMiddleware
 from app.core.config import settings
 from app.core.database import engine, session_factory
@@ -12,6 +12,8 @@ from app.core.telegram import make_bot
 from app.services.ad_manager import AdManager
 from app.services.library import TrackLibrary
 from app.services.music_search import MusicSearch
+from app.services.playlists import PlaylistService
+from app.services.cash_ledger import CashLedger
 from app.services.premium import PremiumService
 from app.services.repository import Repository
 from app.services.user_service import UserService
@@ -30,6 +32,8 @@ async def main() -> None:
     dp.include_router(legal.router)
     dp.include_router(library.router)
     dp.include_router(recognition.router)
+    dp.include_router(playlists.router)
+    dp.include_router(menu.router)
     dp.include_router(handlers.router)
     # Rate limiter runs before subscription check.
     dp.message.middleware(ThrottleMiddleware())
@@ -43,6 +47,8 @@ async def main() -> None:
             bot, settings=settings, redis=redis, repo=repo,
             ads=AdManager(repo), users=UserService(repo), music_search=MusicSearch(),
             library=TrackLibrary(session_factory),
+            playlists=PlaylistService(session_factory),
+            ledger=CashLedger(session_factory),
             premium=PremiumService(session_factory, days=settings.premium_days),
             handle_signals=True,
         )
