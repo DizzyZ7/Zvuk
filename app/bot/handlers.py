@@ -32,9 +32,10 @@ async def start(message: Message, users: UserService) -> None:
 
 async def dispatch_download(
     bot: Bot, chat_id: int, user_id: int, media: MediaURL, kind: str,
-    repo: Repository, redis: Redis, ads: AdManager,
+    repo: Repository, redis: Redis, ads: AdManager, settings: Settings,
 ) -> None:
-    key = cache_key(media, kind)
+    owner_id = user_id if settings.ytdlp_cookies and user_id in settings.admin_ids else None
+    key = cache_key(media, kind, owner_id=owner_id)
     cached = await repo.cache_get(key)
     if cached:
         try:
@@ -61,7 +62,7 @@ async def dispatch_download(
 @router.message(F.chat.type == "private", F.text)
 async def handle_link(
     message: Message, bot: Bot, redis: Redis, repo: Repository,
-    users: UserService, ads: AdManager,
+    users: UserService, ads: AdManager, settings: Settings,
 ) -> None:
     if not message.from_user or not message.text:
         return
@@ -78,7 +79,7 @@ async def handle_link(
     await users.register(message.from_user)
     if media.default_kind:
         await dispatch_download(bot, message.chat.id, message.from_user.id,
-                                media, media.default_kind, repo, redis, ads)
+                                media, media.default_kind, repo, redis, ads, settings)
         return
     token = uuid4().hex[:16]
     await redis.set(
@@ -90,7 +91,7 @@ async def handle_link(
 @router.callback_query(F.data.startswith("fmt:"))
 async def select_format(
     callback: CallbackQuery, bot: Bot, redis: Redis, repo: Repository,
-    users: UserService, ads: AdManager,
+    users: UserService, ads: AdManager, settings: Settings,
 ) -> None:
     if not callback.from_user or not isinstance(callback.message, Message):
         await callback.answer("Сообщение недоступно.", show_alert=True)
@@ -111,7 +112,7 @@ async def select_format(
     await users.register(callback.from_user)
     await callback.answer()
     await dispatch_download(bot, callback.message.chat.id, callback.from_user.id,
-                            media, parts[2], repo, redis, ads)
+                            media, parts[2], repo, redis, ads, settings)
 
 @router.callback_query(F.data == "sub:check")
 async def recheck_subscription(callback: CallbackQuery, bot: Bot, repo: Repository) -> None:

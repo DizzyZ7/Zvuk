@@ -124,7 +124,6 @@ async def remove_channel(callback: CallbackQuery, repo: Repository) -> None:
         await callback.answer("Некорректный ID.", show_alert=True)
         return
     await repo.sponsor_remove(channel_id)
-    await callback.answer("Канал удален.")
     await list_channels(callback, repo)
 
 @router.callback_query(F.data == "adm:ads")

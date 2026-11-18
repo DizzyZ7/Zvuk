@@ -28,7 +28,7 @@ class MediaDownloader:
         self.spotify = SpotifyResolver(settings)
         self._proxies = itertools.cycle(settings.proxy_list) if settings.proxy_list else None
 
-    async def download(self, media: MediaURL, kind: str, folder: Path) -> DownloadedMedia:
+    async def download(self, media: MediaURL, kind: str, folder: Path, *, use_auth_cookies: bool = False) -> DownloadedMedia:
         if kind not in ("audio", "video"):
             raise MediaDownloadError("Неизвестный формат.")
         if media.platform in ("spotify", "yandex") and kind == "video":
@@ -60,7 +60,7 @@ class MediaDownloader:
         }
         if proxy:
             opts["proxy"] = proxy
-        if self.settings.ytdlp_cookies:
+        if self.settings.ytdlp_cookies and use_auth_cookies:
             cookies = Path(self.settings.ytdlp_cookies)
             if not cookies.is_file():
                 raise MediaDownloadError("Файл cookies не найден на сервере.")

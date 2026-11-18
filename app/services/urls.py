@@ -70,5 +70,7 @@ def find_media_url(text: str) -> MediaURL | None:
         return None
     return parse_media_url(found.group(0).rstrip(".,;!?)\u00bb"))
 
-def cache_key(media: MediaURL, kind: str) -> str:
-    return hashlib.sha256(f"{kind}:{media.url}".encode()).hexdigest()
+def cache_key(media: MediaURL, kind: str, owner_id: int | None = None) -> str:
+    # Authenticated downloads cannot be reused across users.
+    scope = str(owner_id) if owner_id is not None else "public"
+    return hashlib.sha256(f"{scope}:{kind}:{media.url}".encode()).hexdigest()
