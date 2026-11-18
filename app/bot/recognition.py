@@ -1,7 +1,9 @@
-"""Recognition of voice/audio/video messages and search of public matches."""
+"""Recognition of short voice/audio/video clips with cost and abuse controls."""
+import asyncio
 import json
 import logging
 import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
@@ -9,16 +11,62 @@ from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from app.bot.keyboards import search_keyboard
 from app.core.config import Settings
 from app.services.music_search import MusicSearch, MusicSearchError
 from app.services.premium import PremiumService
-from app.services.recognition import MusicRecognizer, RecognitionError
+from app.services.queue import release_lock
+from app.services.recognition import MusicRecognizer, Recognition, RecognitionError
 from app.services.user_service import UserService
 
 log = logging.getLogger(__name__)
 router = Router(name="recognition")
+recognition_slots = asyncio.Semaphore(2)
+
+# The two counters must be checked and incremented in one Lua script. This
+# prevents races between instances and avoids paid API requests after the cap.
+QUOTA_SCRIPT = """
+local daily = tonumber(redis.call('GET', KEYS[1]) or '0')
+local monthly = tonumber(redis.call('GET', KEYS[2]) or '0')
+if daily >= tonumber(ARGV[1]) then return 1 end
+if monthly >= tonumber(ARGV[2]) then return 2 end
+if redis.call('INCR', KEYS[1]) == 1 then
+  redis.call('EXPIRE', KEYS[1], 86400)
+end
+if redis.call('INCR', KEYS[2]) == 1 then
+  redis.call('EXPIRE', KEYS[2], 3456000)
+end
+return 0
+"""
+
+
+async def reserve_recognition(
+    redis: Redis, user_id: int, *, daily_limit: int, monthly_cap: int,
+) -> int:
+    month = datetime.now(timezone.utc).strftime("%Y-%m")
+    return int(await redis.eval(
+        QUOTA_SCRIPT, 2,
+        f"recognition:daily:{user_id}",
+        f"recognition:month:{month}",
+        daily_limit, monthly_cap,
+    ))
+
+
+async def recognize_file(
+    bot: Bot, file_id: str, settings: Settings,
+) -> Recognition | None:
+    async with recognition_slots:
+        with tempfile.TemporaryDirectory(prefix="zvuk_rec_", dir="/shared") as directory:
+            folder = Path(directory)
+            original = folder / "original_media"
+            await bot.download(file_id, destination=original, timeout=90)
+            if original.stat().st_size > settings.recognition_max_input_mb * 1_000_000:
+                raise RecognitionError("Файл слишком большой. Пришлите короткий фрагмент.")
+            return await MusicRecognizer(
+                settings.audd_api_token.get_secret_value(),
+            ).recognize(original, folder)
 
 
 @router.message(
@@ -34,7 +82,7 @@ async def recognize_message(
         await message.answer("Распознавание музыки пока не подключено.")
         return
     media = message.voice or message.audio or message.video or message.video_note
-    if not media:
+    if media is None:
         return
     if (media.file_size or 0) > settings.recognition_max_input_mb * 1_000_000:
         await message.answer(
@@ -43,64 +91,91 @@ async def recognize_message(
         )
         return
     await users.register(message.from_user)
-    active = await premium.active_until(message.from_user.id)
-    daily_limit = (
-        settings.premium_recognitions_daily if active
-        else settings.free_recognitions_daily
-    )
-    # Increment/expire atomically so concurrent voice messages cannot bypass quotas.
-    key = f"recognition:daily:{message.from_user.id}"
-    usage = int(await redis.eval(
-        "local n=redis.call('INCR',KEYS[1]);"
-        "if n==1 then redis.call('EXPIRE',KEYS[1],ARGV[1]);end;return n",
-        1, key, 86400,
-    ))
-    if usage > daily_limit and message.from_user.id not in settings.admin_ids:
-        await message.answer(
-            f"Лимит распознаваний: {daily_limit} за 24 часа. "
-            "Дополнительные запросы доступны с /premium."
-        )
-        return
-    status = await message.answer("🎧 Анализирую фрагмент. Сервису AudD будет передан звук.")
+    user_id = message.from_user.id
+    lock_key = f"recognition:busy:{user_id}"
+    token = uuid4().hex
     try:
-        with tempfile.TemporaryDirectory(prefix="zvuk_rec_", dir="/shared") as directory:
-            folder = Path(directory)
-            original = folder / "original_media"
-            await bot.download(media.file_id, destination=original, timeout=90)
-            result = await MusicRecognizer(
-                settings.audd_api_token.get_secret_value(),
-            ).recognize(original, folder)
-    except (RecognitionError, TelegramAPIError, TimeoutError) as exc:
-        log.warning("Recognition failed for user=%s: %s", message.from_user.id, exc)
+        acquired = await redis.set(lock_key, token, nx=True, ex=180)
+    except RedisError:
+        await message.answer("Распознавание временно недоступно. Попробуйте позже.")
+        return
+    if not acquired:
+        await message.answer("⏳ Ваш предыдущий фрагмент еще обрабатывается.")
+        return
+    try:
+        active = await premium.active_until(user_id)
+        daily_limit = (
+            settings.premium_recognitions_daily if active
+            else settings.free_recognitions_daily
+        )
+        if user_id in settings.admin_ids:
+            daily_limit = max(daily_limit, 1000)
+        quota = await reserve_recognition(
+            redis, user_id, daily_limit=daily_limit,
+            monthly_cap=settings.recognition_monthly_cap,
+        )
+        if quota == 1:
+            await message.answer(
+                f"Лимит — {daily_limit} распознаваний за 24 часа. "
+                "У Premium лимит выше: /premium."
+            )
+            return
+        if quota == 2:
+            await message.answer(
+                "Лимит запросов к сервису распознавания исчерпан. "
+                "Попробуйте позднее."
+            )
+            return
+
+        status = await message.answer(
+            "🎧 Анализирую фрагмент. Короткий звуковой отрывок "
+            "будет передан AudD для распознавания."
+        )
+        try:
+            result = await recognize_file(bot, media.file_id, settings)
+        except (RecognitionError, TelegramAPIError, TimeoutError, OSError) as exc:
+            log.warning("Recognition failed for user=%s: %s", user_id, exc)
+            await status.edit_text(
+                str(exc) if isinstance(exc, RecognitionError)
+                else "Не удалось обработать файл. Попробуйте позже."
+            )
+            return
+        if result is None:
+            await status.edit_text(
+                "Не удалось распознать песню. Попробуйте другой фрагмент."
+            )
+            return
+        try:
+            matches = await music_search.search(
+                f"{result.artist} - {result.title}", limit=3,
+            )
+        except MusicSearchError:
+            matches = []
+        text = f"✅ Распознано: {result.artist} — {result.title}"
+        if not matches:
+            await status.edit_text(
+                text + "\nПодходящей общедоступной записи пока не найдено."
+            )
+            return
+        search_token = uuid4().hex[:16]
+        await redis.set(
+            f"search:{search_token}",
+            json.dumps({
+                "user": user_id,
+                "urls": [item.url for item in matches],
+                "titles": [item.title for item in matches],
+                "artists": [item.artist for item in matches],
+            }), ex=900,
+        )
         await status.edit_text(
-            str(exc) if isinstance(exc, RecognitionError) else
-            "Не удалось получить файл или обработать аудио. Попробуйте позже."
+            text + "\nВот похожие записи из поиска:",
+            reply_markup=search_keyboard(search_token, matches),
         )
-        return
-    if result is None:
-        await status.edit_text("Не удалось распознать песню. Попробуйте другой фрагмент.")
-        return
-    try:
-        matches = await music_search.search(
-            f"{result.artist} - {result.title}", limit=3,
-        )
-    except MusicSearchError:
-        matches = []
-    message_text = f"✅ Распознано: {result.artist} — {result.title}"
-    if not matches:
-        await status.edit_text(message_text + "\nПодходящей открытой записи пока не найдено.")
-        return
-    token = uuid4().hex[:16]
-    await redis.set(
-        f"search:{token}",
-        json.dumps({
-            "user": message.from_user.id,
-            "urls": [item.url for item in matches],
-            "titles": [item.title for item in matches],
-            "artists": [item.artist for item in matches],
-        }), ex=900,
-    )
-    await status.edit_text(
-        message_text + "\nВот похожие записи из поиска:",
-        reply_markup=search_keyboard(token, matches),
-    )
+    except RedisError:
+        log.exception("Redis quota/lock service unavailable for recognition")
+        await message.answer("Распознавание временно недоступно. Попробуйте позже.")
+    finally:
+        try:
+            await release_lock(redis, lock_key, token)
+        except RedisError:
+            log.exception("Could not release recognition lock for user=%s", user_id)

@@ -33,7 +33,7 @@ class MusicRecognizer:
         clip = folder / "recognition_clip.wav"
         proc = await asyncio.create_subprocess_exec(
             "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-            "-i", str(source), "-t", "17", "-vn", "-ac", "1", "-ar", "16000",
+            "-i", str(source), "-t", "12", "-vn", "-ac", "1", "-ar", "16000",
             "-c:a", "pcm_s16le", str(clip),
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
         )

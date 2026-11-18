@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     spotify_client_id: str = ""
     audd_api_token: SecretStr = SecretStr("")
     recognition_max_input_mb: int = Field(default=20, ge=1, le=100)
+    recognition_monthly_cap: int = Field(default=300, ge=1, le=1000000)
     free_recognitions_daily: int = Field(default=3, ge=0, le=100)
     premium_recognitions_daily: int = Field(default=20, ge=1, le=1000)
     premium_price_stars: int = Field(default=149, ge=1, le=100000)
