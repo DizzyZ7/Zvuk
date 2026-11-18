@@ -1,7 +1,4 @@
 """Home menu and optional lyric-fragment discovery hints."""
-import json
-from uuid import uuid4
-
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -12,6 +9,7 @@ from app.bot.playlists import playlist_keyboard
 from app.services.library import TrackLibrary
 from app.services.music_search import MusicSearch, MusicSearchError
 from app.services.playlists import PlaylistService
+from app.services.search_sessions import create_search
 
 router = Router(name="menu")
 
@@ -109,13 +107,7 @@ async def fragment_search(
     if not matches:
         await status.edit_text("Совпадений не найдено. Попробуйте более длинную фразу.")
         return
-    token = uuid4().hex[:16]
-    await redis.set(f"search:{token}", json.dumps({
-        "user": message.from_user.id,
-        "urls": [item.url for item in matches],
-        "titles": [item.title for item in matches],
-        "artists": [item.artist for item in matches],
-    }), ex=900)
+    token = await create_search(redis, message.from_user.id, matches)
     await status.edit_text(
         "🔍 Возможные совпадения (точность не гарантируется):",
         reply_markup=search_keyboard(token, matches),

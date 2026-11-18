@@ -19,20 +19,51 @@ def format_keyboard(token: str, *, allow_video: bool = True) -> InlineKeyboardMa
         ],
     ])
 
-def search_keyboard(token: str, results: list[SearchResult]) -> InlineKeyboardMarkup:
+def search_keyboard(
+    token: str, results: list[SearchResult] | tuple[SearchResult, ...],
+    *, page: int = 0, selected: set[int] | None = None,
+) -> InlineKeyboardMarkup:
+    """Up to 10 results, five per page; all remain available for 30 minutes."""
+    from app.services.search_sessions import PAGE_SIZE
+
+    selected = selected or set()
+    page = max(0, min(page, (len(results) - 1) // PAGE_SIZE))
     rows = []
-    for number, result in enumerate(results, start=1):
-        label = f"{number}. {result.title}"
+    first = page * PAGE_SIZE
+    for index, result in enumerate(results[first:first + PAGE_SIZE], start=first):
+        label = f"{index + 1}. {result.title}"
         if result.artist:
             label += f" — {result.artist}"
+        downloaded = index in selected
         rows.append([
             InlineKeyboardButton(
-                text=("🎧 " + label)[:56], callback_data=f"find:{token}:{number - 1}",
+                text=("🔁 " if downloaded else "🎧 ") + label[:38],
+                callback_data=f"find:{token}:{index}",
             ),
-            InlineKeyboardButton(
-                text="💾", callback_data=f"stash:{token}:{number - 1}",
-            ),
+            InlineKeyboardButton(text="💾", callback_data=f"stash:{token}:{index}"),
+            InlineKeyboardButton(text="➕", callback_data=f"pls:{token}:{index}"),
         ])
+    if len(results) > PAGE_SIZE:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton(
+                text="⬅️ Назад", callback_data=f"searchpage:{token}:{page - 1}",
+            ))
+        nav.append(InlineKeyboardButton(
+            text=f"{page + 1}/{(len(results) + PAGE_SIZE - 1) // PAGE_SIZE}",
+            callback_data=f"searchpage:{token}:{page}",
+        ))
+        if first + PAGE_SIZE < len(results):
+            nav.append(InlineKeyboardButton(
+                text="Вперед ➡️", callback_data=f"searchpage:{token}:{page + 1}",
+            ))
+        rows.append(nav)
+    remaining = max(0, len(results) - len(selected))
+    if remaining:
+        rows.append([InlineKeyboardButton(
+            text=f"📥 Скачать следующие {min(remaining, 3)}",
+            callback_data=f"findall:{token}",
+        )])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -43,6 +74,7 @@ def library_keyboard(tracks: list[SavedTrack]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text=("🎵 " + track.title)[:48], callback_data=f"libplay:{track.id}",
             ),
+            InlineKeyboardButton(text="➕", callback_data=f"libpls:{track.id}"),
             InlineKeyboardButton(text="🗑", callback_data=f"libdel:{track.id}"),
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)

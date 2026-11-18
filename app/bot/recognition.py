@@ -1,6 +1,5 @@
 """Recognition of short voice/audio/video clips with cost and abuse controls."""
 import asyncio
-import json
 import logging
 import tempfile
 from datetime import datetime, timezone
@@ -18,6 +17,7 @@ from app.core.config import Settings
 from app.services.music_search import MusicSearch, MusicSearchError
 from app.services.premium import PremiumService
 from app.services.queue import release_lock
+from app.services.search_sessions import create_search
 from app.services.recognition import MusicRecognizer, Recognition, RecognitionError
 from app.services.user_service import UserService
 
@@ -157,16 +157,7 @@ async def recognize_message(
                 text + "\nПодходящей общедоступной записи пока не найдено."
             )
             return
-        search_token = uuid4().hex[:16]
-        await redis.set(
-            f"search:{search_token}",
-            json.dumps({
-                "user": user_id,
-                "urls": [item.url for item in matches],
-                "titles": [item.title for item in matches],
-                "artists": [item.artist for item in matches],
-            }), ex=900,
-        )
+        search_token = await create_search(redis, user_id, matches)
         await status.edit_text(
             text + "\nВот похожие записи из поиска:",
             reply_markup=search_keyboard(search_token, matches),

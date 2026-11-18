@@ -25,3 +25,13 @@ def test_playlist_track_buttons_have_distinct_actions():
     assert [x.callback_data for x in rows.inline_keyboard[0]] == [
         "plplay:5", "pldrop:5",
     ]
+
+
+
+def test_choose_playlist_buttons_include_search_token_and_owner_scoped_target():
+    from app.bot.playlists import destination_keyboard
+
+    token = "abc0123456789def"
+    playlist = SimpleNamespace(id=12, name="Favorites")
+    buttons = destination_keyboard([playlist], origin=token, index=5)
+    assert buttons.inline_keyboard[0][0].callback_data == f"plsave:{token}:5:12"

@@ -14,7 +14,11 @@ from app.core.config import Settings
 from app.services.ad_manager import AdManager
 from app.services.media_downloader import AUDIO_KINDS
 from app.services.music_search import MusicSearch, MusicSearchError
-from app.services.queue import enqueue_download
+from app.services.queue import enqueue_download, release_lock
+from app.services.search_sessions import (
+    MAX_BATCH_PER_TAP, PAGE_SIZE, SearchSessionError,
+    create_search, lock_key, mark_selected, read_search, selected_indices,
+)
 from app.services.repository import Repository
 from app.services.urls import InvalidMediaURL, MediaURL, cache_key, find_media_url, parse_media_url
 from app.services.user_service import UserService
@@ -41,7 +45,7 @@ async def start(message: Message, users: UserService) -> None:
 async def dispatch_download(
     bot: Bot, chat_id: int, user_id: int, media: MediaURL, kind: str,
     repo: Repository, redis: Redis, ads: AdManager, settings: Settings,
-) -> None:
+) -> str:
     owner_id = user_id if settings.ytdlp_cookies and user_id in settings.admin_ids else None
     key = cache_key(media, kind, owner_id=owner_id)
     cached = await repo.cache_get(key)
@@ -55,25 +59,37 @@ async def dispatch_download(
             await ads.delivered(placement)
             history_id = await repo.new_download(user_id, media.url, key, kind)
             await repo.update_download(history_id, "success", cache_hit=True)
-            return
+            return "cached"
         except TelegramBadRequest as exc:
             if "wrong file" in str(exc).lower() or "invalid file" in str(exc).lower():
                 await repo.cache_drop(key)
             else:
                 raise
-    if await repo.pending_downloads(user_id) >= settings.max_pending_per_user:
-        await bot.send_message(
-            chat_id, f"⏳ В очереди уже {settings.max_pending_per_user} задачи. "
-            "Дождитесь завершения одной из них."
-        )
-        return
-    job_id = await repo.new_download(user_id, media.url, key, kind)
+    # Cross-instance admission lock keeps concurrent callbacks from bypassing
+    # the per-user pending limit. No row in the queue is made for a rejected item.
+    token = uuid4().hex
+    admission_key = f"queue-admission:{user_id}"
+    acquired = await redis.set(admission_key, token, nx=True, ex=30)
+    if not acquired:
+        await bot.send_message(chat_id, "⏳ Другой запрос уже ставится в очередь. Повторите позже.")
+        return "busy"
     try:
-        await enqueue_download(redis, job_id)
-    except Exception:
-        await repo.update_download(job_id, "failed", "Не удалось поставить задачу в очередь")
-        raise
+        if await repo.pending_downloads(user_id) >= settings.max_pending_per_user:
+            await bot.send_message(
+                chat_id, f"⏳ В очереди уже {settings.max_pending_per_user} задачи. "
+                "Дождитесь завершения одной из них."
+            )
+            return "limit"
+        job_id = await repo.new_download(user_id, media.url, key, kind)
+        try:
+            await enqueue_download(redis, job_id)
+        except Exception:
+            await repo.update_download(job_id, "failed", "Не удалось поставить задачу в очередь")
+            raise
+    finally:
+        await release_lock(redis, admission_key, token)
     await bot.send_message(chat_id, "⏳ Задача добавлена в очередь. Пришлю файл сюда.")
+    return "queued"
 
 @router.message(F.chat.type == "private", F.text)
 async def handle_link(
@@ -94,7 +110,7 @@ async def handle_link(
         await users.register(message.from_user)
         progress = await message.answer("🔎 Ищу музыку...")
         try:
-            results = await music_search.search(message.text)
+            results = await music_search.search(message.text, limit=10)
         except MusicSearchError as exc:
             await progress.edit_text(str(exc))
             return
@@ -103,19 +119,11 @@ async def handle_link(
                 "Ничего не нашел. Попробуйте указать название песни и исполнителя."
             )
             return
-        token = uuid4().hex[:16]
-        await redis.set(
-            f"search:{token}",
-            json.dumps({
-                "user": message.from_user.id,
-                "urls": [result.url for result in results],
-                "titles": [result.title for result in results],
-                "artists": [result.artist for result in results],
-            }),
-            ex=900,
-        )
+        token = await create_search(redis, message.from_user.id, results)
         await progress.edit_text(
-            "🎵 Вот что нашел. Выберите трек для отправки в MP3:",
+            f"🎵 Найдено {len(results)} записей. Можно скачать несколько треков, "
+            "сохранить в плейлист или использовать кнопку пакетной загрузки. "
+            "Результаты доступны 30 минут.",
             reply_markup=search_keyboard(token, results),
         )
         return
@@ -150,58 +158,173 @@ async def select_format(
     if choice["user"] != callback.from_user.id:
         await callback.answer("Эта кнопка предназначена другому пользователю.", show_alert=True)
         return
-    # Atomically consume this choice. Multiple taps must not enqueue the same
-    # download twice. Redis GETDEL is available in Redis 6.2+.
-    consumed = await redis.getdel(f"choice:{parts[1]}")
-    if consumed is None:
-        await callback.answer("Формат уже выбран. Отправьте ссылку заново.", show_alert=True)
-        return
     media = parse_media_url(choice["url"])
     if media.default_kind and parts[2] == "video":
         await callback.answer("Для музыкальных ссылок доступно только аудио.", show_alert=True)
+        return
+    # Consume only a VALID choice, so an invalid format does not invalidate the buttons.
+    consumed = await redis.getdel(f"choice:{parts[1]}")
+    if consumed is None:
+        await callback.answer("Формат уже выбран. Отправьте ссылку заново.", show_alert=True)
         return
     await users.register(callback.from_user)
     await callback.answer()
     await dispatch_download(bot, callback.message.chat.id, callback.from_user.id,
                             media, parts[2], repo, redis, ads, settings)
 
+async def _search_callback_context(
+    callback: CallbackQuery, redis: Redis, token: str,
+):
+    """Validate user ownership before permitting a fetch, batch or page change."""
+    if not callback.from_user or not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return None
+    try:
+        return await read_search(redis, token, callback.from_user.id)
+    except SearchSessionError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return None
+
+
+async def _refresh_search_keyboard(
+    callback: CallbackQuery, redis: Redis, token: str, results,
+    *, page: int = 0,
+) -> None:
+    selected = await selected_indices(redis, token)
+    await callback.message.edit_reply_markup(
+        reply_markup=search_keyboard(token, results, page=page, selected=selected),
+    )
+
+
+async def _submit_search_results(
+    callback: CallbackQuery, token: str, indices: list[int],
+    bot: Bot, redis: Redis, repo: Repository, ads: AdManager, settings: Settings,
+    results, *, allow_repeat: bool = False,
+) -> tuple[int, int]:
+    lock = lock_key(token)
+    owner = uuid4().hex
+    acquired = await redis.set(lock, owner, ex=90, nx=True)
+    if not acquired:
+        await callback.answer("⏳ Предыдущий выбор еще обрабатывается.")
+        return 0, 0
+    accepted = 0
+    exhausted = 0
+    try:
+        already = await selected_indices(redis, token)
+        for index in indices:
+            if index in already and not allow_repeat:
+                continue
+            media = parse_media_url(results[index].url)
+            result = await dispatch_download(
+                bot, callback.message.chat.id, callback.from_user.id,
+                media, "audio", repo, redis, ads, settings,
+            )
+            if result in {"queued", "cached"}:
+                await mark_selected(redis, token, index)
+                accepted += 1
+            elif result in {"limit", "busy"}:
+                exhausted += 1
+                break
+        return accepted, exhausted
+    finally:
+        await release_lock(redis, lock, owner)
+
+
 @router.callback_query(F.data.startswith("find:"))
 async def select_search_result(
     callback: CallbackQuery, bot: Bot, redis: Redis, repo: Repository,
     users: UserService, ads: AdManager, settings: Settings,
 ) -> None:
-    if not callback.from_user or not isinstance(callback.message, Message):
-        await callback.answer("Сообщение недоступно.", show_alert=True)
-        return
     parts = (callback.data or "").split(":")
     if len(parts) != 3 or not parts[2].isdigit():
         await callback.answer("Некорректная кнопка.", show_alert=True)
         return
-    key = f"search:{parts[1]}"
-    raw = await redis.get(key)
-    if raw is None:
-        await callback.answer("Поиск устарел. Отправьте запрос заново.", show_alert=True)
+    token, index = parts[1], int(parts[2])
+    session = await _search_callback_context(callback, redis, token)
+    if session is None:
         return
-    choice = json.loads(raw)
-    index = int(parts[2])
-    urls = choice.get("urls", [])
-    if choice.get("user") != callback.from_user.id:
-        await callback.answer("Это результаты другого пользователя.", show_alert=True)
+    try:
+        session.get(index)
+    except SearchSessionError as exc:
+        await callback.answer(str(exc), show_alert=True)
         return
-    if not isinstance(urls, list) or not 0 <= index < len(urls):
-        await callback.answer("Трек недоступен.", show_alert=True)
-        return
-    consumed = await redis.getdel(key)
-    if consumed is None:
-        await callback.answer("Трек уже выбран.", show_alert=True)
-        return
-    media = parse_media_url(urls[index])
+    already = index in await selected_indices(redis, token)
+    if already:
+        # A previously queued track may fail at the provider; allow users to
+        # retry it from the same results, but prevent rapid double clicks.
+        retry_key = f"search:retry:{token}:{callback.from_user.id}:{index}"
+        if not await redis.set(retry_key, "1", ex=8, nx=True):
+            await callback.answer("Трек уже запрошен. Попробуйте чуть позже.")
+            return
     await users.register(callback.from_user)
-    await callback.answer()
-    await dispatch_download(
-        bot, callback.message.chat.id, callback.from_user.id,
-        media, "audio", repo, redis, ads, settings,
+    accepted, blocked = await _submit_search_results(
+        callback, token, [index], bot, redis, repo, ads, settings,
+        session.results, allow_repeat=already,
     )
+    if accepted:
+        await _refresh_search_keyboard(
+            callback, redis, token, session.results, page=index // PAGE_SIZE,
+        )
+        await callback.answer("🎵 Трек отправляется!")
+    elif not blocked:
+        # The lock handler has already acknowledged the callback.
+        return
+    else:
+        await callback.answer("Освободите место в очереди.", show_alert=True)
+
+
+@router.callback_query(F.data.startswith("findall:"))
+async def select_search_batch(
+    callback: CallbackQuery, bot: Bot, redis: Redis, repo: Repository,
+    users: UserService, ads: AdManager, settings: Settings,
+) -> None:
+    parts = (callback.data or "").split(":")
+    if len(parts) != 2:
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    token = parts[1]
+    session = await _search_callback_context(callback, redis, token)
+    if session is None:
+        return
+    selected = await selected_indices(redis, token)
+    remaining = [i for i in range(len(session.results)) if i not in selected]
+    if not remaining:
+        await callback.answer("Все треки из этого поиска уже отправлены.")
+        return
+    await users.register(callback.from_user)
+    # Never queue more than three from a single button tap.
+    accepted, blocked = await _submit_search_results(
+        callback, token, remaining[:MAX_BATCH_PER_TAP],
+        bot, redis, repo, ads, settings, session.results,
+    )
+    if accepted:
+        await _refresh_search_keyboard(callback, redis, token, session.results)
+        rest = len(remaining) - accepted
+        await callback.answer(
+            f"✅ Выбрано {accepted}. " +
+            (f"Еще {rest}: нажмите кнопку позже." if rest else "Готово."),
+        )
+    elif blocked:
+        await callback.answer("Очередь заполнена. Попробуйте после завершения загрузок.")
+    # Otherwise already acknowledged by the lock handler.
+
+
+@router.callback_query(F.data.startswith("searchpage:"))
+async def browse_search_page(callback: CallbackQuery, redis: Redis) -> None:
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3 or not parts[2].isdigit():
+        await callback.answer("Некорректная страница.", show_alert=True)
+        return
+    token, page = parts[1], int(parts[2])
+    session = await _search_callback_context(callback, redis, token)
+    if session is None:
+        return
+    max_page = (len(session.results) - 1) // PAGE_SIZE
+    if page > max_page:
+        await callback.answer("Такой страницы нет.", show_alert=True)
+        return
+    await _refresh_search_keyboard(callback, redis, token, session.results, page=page)
+    await callback.answer()
 
 
 @router.callback_query(F.data == "sub:check")

@@ -9,6 +9,8 @@ from app.core.config import Settings
 from app.services.ad_manager import AdManager
 from app.services.playlists import PlaylistService
 from app.services.repository import Repository
+from app.services.library import TrackLibrary
+from app.services.search_sessions import SearchSessionError, read_search
 from app.services.urls import InvalidMediaURL, parse_media_url
 from app.services.user_service import UserService
 
@@ -185,3 +187,132 @@ async def remove_playlist_track(
     else:
         await callback.message.edit_text("🎼 Плейлист теперь пуст.")
     await callback.answer("Удалено")
+
+
+
+def destination_keyboard(playlists, *, origin: str, index: int) -> InlineKeyboardMarkup:
+    """origin is a short server-generated search token or saved library id."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text=("🎼 " + playlist.name)[:55],
+            callback_data=f"plsave:{origin}:{index}:{playlist.id}",
+        )] for playlist in playlists
+    ])
+
+
+@router.callback_query(F.data.startswith("pls:"))
+async def choose_search_playlist(
+    callback: CallbackQuery, redis: Redis, playlists: PlaylistService,
+) -> None:
+    if not callback.from_user or not isinstance(callback.message, Message):
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3 or not parts[2].isdecimal():
+        await callback.answer("Некорректный трек.", show_alert=True)
+        return
+    try:
+        session = await read_search(redis, parts[1], callback.from_user.id)
+        session.get(int(parts[2]))
+    except SearchSessionError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    destinations = await playlists.list(callback.from_user.id)
+    if not destinations:
+        await callback.message.answer(
+            "🎼 Сначала создайте плейлист командой /playlist new Моя музыка, "
+            "затем снова нажмите ➕ под треком."
+        )
+        await callback.answer()
+        return
+    await callback.message.answer(
+        "Выберите плейлист для добавления:",
+        reply_markup=destination_keyboard(destinations, origin=parts[1], index=int(parts[2])),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("plsave:"))
+async def save_search_to_playlist(
+    callback: CallbackQuery, redis: Redis, playlists: PlaylistService,
+) -> None:
+    if not callback.from_user or not isinstance(callback.message, Message):
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) != 4 or not parts[2].isdecimal() or not parts[3].isdecimal():
+        await callback.answer("Некорректные параметры.", show_alert=True)
+        return
+    try:
+        session = await read_search(redis, parts[1], callback.from_user.id)
+        track = session.get(int(parts[2]))
+        saved = await playlists.add(
+            callback.from_user.id, int(parts[3]), parse_media_url(track.url),
+            title=track.title, artist=track.artist,
+        )
+    except (SearchSessionError, ValueError) as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    if not saved:
+        await callback.answer("Этот плейлист недоступен.", show_alert=True)
+        return
+    await callback.answer("✅ Трек сохранен в плейлист!")
+
+
+@router.callback_query(F.data.startswith("libpls:"))
+async def choose_library_playlist(
+    callback: CallbackQuery, library: TrackLibrary, playlists: PlaylistService,
+) -> None:
+    if not callback.from_user or not isinstance(callback.message, Message):
+        return
+    raw = (callback.data or "").removeprefix("libpls:")
+    if not raw.isdecimal():
+        await callback.answer("Некорректный трек.", show_alert=True)
+        return
+    track = await library.get(callback.from_user.id, int(raw))
+    if track is None:
+        await callback.answer("Трек не найден.", show_alert=True)
+        return
+    destinations = await playlists.list(callback.from_user.id)
+    if not destinations:
+        await callback.message.answer(
+            "🎼 Создайте плейлист командой /playlist new Моя музыка."
+        )
+        await callback.answer()
+        return
+    await callback.message.answer(
+        "Сохранить избранный трек в:",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text=("🎼 " + playlist.name)[:55],
+                callback_data=f"libadd:{track.id}:{playlist.id}",
+            )] for playlist in destinations
+        ]),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("libadd:"))
+async def save_library_to_playlist(
+    callback: CallbackQuery, library: TrackLibrary, playlists: PlaylistService,
+) -> None:
+    if not callback.from_user:
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3 or not parts[1].isdecimal() or not parts[2].isdecimal():
+        await callback.answer("Некорректные параметры.", show_alert=True)
+        return
+    track = await library.get(callback.from_user.id, int(parts[1]))
+    if track is None:
+        await callback.answer("Трек не найден.", show_alert=True)
+        return
+    try:
+        saved = await playlists.add(
+            callback.from_user.id, int(parts[2]),
+            parse_media_url(track.url), title=track.title, artist=track.artist,
+        )
+    except ValueError as exc:
+        await callback.answer(str(exc), show_alert=True)
+        return
+    await callback.answer(
+        "✅ Сохранено в плейлист!" if saved else "Плейлист недоступен.",
+        show_alert=not saved,
+    )

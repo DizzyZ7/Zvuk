@@ -1,6 +1,4 @@
 """Per-user music bookmarks with safe ownership checks on every callback."""
-import json
-
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
@@ -12,6 +10,7 @@ from app.core.config import Settings
 from app.services.ad_manager import AdManager
 from app.services.library import TrackLibrary
 from app.services.repository import Repository
+from app.services.search_sessions import SearchSessionError, read_search
 from app.services.urls import InvalidMediaURL, parse_media_url
 from app.services.user_service import UserService
 
@@ -68,25 +67,17 @@ async def save_search_result(
     if len(parts) != 3 or not parts[2].isdigit():
         await callback.answer("Некорректная кнопка.", show_alert=True)
         return
-    raw = await redis.get(f"search:{parts[1]}")
-    if raw is None:
-        await callback.answer("Поиск устарел. Отправьте запрос заново.", show_alert=True)
+    try:
+        session = await read_search(redis, parts[1], callback.from_user.id)
+        track = session.get(int(parts[2]))
+    except SearchSessionError as exc:
+        await callback.answer(str(exc), show_alert=True)
         return
-    data = json.loads(raw)
-    idx = int(parts[2])
-    urls = data.get("urls", [])
-    if data.get("user") != callback.from_user.id:
-        await callback.answer("Это результаты другого пользователя.", show_alert=True)
-        return
-    if not 0 <= idx < len(urls):
-        await callback.answer("Трек не найден.", show_alert=True)
-        return
-    media = parse_media_url(urls[idx])
-    titles, artists = data.get("titles", []), data.get("artists", [])
-    title = titles[idx] if idx < len(titles) else "Музыка"
-    artist = artists[idx] if idx < len(artists) else ""
+    media = parse_media_url(track.url)
     await users.register(callback.from_user)
-    await library.save(callback.from_user.id, media, title=title, artist=artist)
+    await library.save(
+        callback.from_user.id, media, title=track.title, artist=track.artist,
+    )
     await callback.answer("💾 Добавлено в библиотеку!")
 
 

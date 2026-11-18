@@ -80,21 +80,35 @@ class MediaDownloader:
             }]
         else:
             opts["merge_output_format"] = "mp4"
-        operation = asyncio.create_task(asyncio.to_thread(self._run_ytdlp, target, opts))
-        try:
-            info = await asyncio.shield(operation)
-        except asyncio.CancelledError:
-            # Let the downloader finish before TemporaryDirectory is removed.
+        # yt-dlp can intermittently fail on otherwise public videos. Retry
+        # short-lived network/5xx failures, but never hammer a rate-limited site
+        # or retry definitive private/login/DRM restrictions.
+        info = None
+        for attempt in range(2):
+            operation = asyncio.create_task(asyncio.to_thread(self._run_ytdlp, target, opts))
             try:
-                await operation
-            finally:
-                raise
-        except DownloadError as exc:
-            log.warning("yt-dlp failure: %s", str(exc)[:800])
-            raise MediaDownloadError(self._human_error(str(exc))) from exc
-        except Exception as exc:
-            log.exception("Unexpected yt-dlp error")
-            raise MediaDownloadError("Ошибка обработки медиа. Попробуйте другую ссылку.") from exc
+                info = await asyncio.shield(operation)
+                break
+            except asyncio.CancelledError:
+                # Let the extractor finish before its TemporaryDirectory goes away.
+                try:
+                    await operation
+                finally:
+                    raise
+            except DownloadError as exc:
+                log.warning(
+                    "yt-dlp attempt %s/2 failed (%s): %s",
+                    attempt + 1, media.platform, str(exc)[:800],
+                )
+                if attempt == 0 and self._should_retry(str(exc)):
+                    await asyncio.sleep(2)
+                    continue
+                raise MediaDownloadError(self._human_error(str(exc))) from exc
+            except Exception as exc:
+                log.exception("Unexpected yt-dlp error")
+                raise MediaDownloadError(
+                    "Ошибка обработки медиа. Попробуйте другую ссылку."
+                ) from exc
         candidates = sorted(
             (p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in
              ((".mp3",) if kind in AUDIO_KINDS else (".mp4", ".mkv", ".webm", ".mov"))),
@@ -108,7 +122,7 @@ class MediaDownloader:
         if kind in TEMPO_FACTORS:
             path = await self._shift_tempo(path, TEMPO_FACTORS[kind], kind)
         if path.stat().st_size > self.settings.max_file_mb * 1_000_000:
-            raise MediaDownloadError("Файл превышает лимит Telegram (2000 МБ).")
+            raise MediaDownloadError(f"Размер файла превышает установленный лимит {self.settings.max_file_mb} МБ.")
         if isinstance(info, dict) and "entries" in info:
             info = next((e for e in info["entries"] if e), {})
         info = info if isinstance(info, dict) else {}
@@ -137,21 +151,55 @@ class MediaDownloader:
             return ydl.extract_info(target, download=True)
 
     @staticmethod
+    def _should_retry(message: str) -> bool:
+        lower = message.lower()
+        # Do not multiply load on services that are already rate limiting us.
+        if any(part in lower for part in (
+            "429", "too many requests", "rate limit",
+            "sign in to confirm you're not a bot", "private", "login required",
+            "members-only", "copyright", "not available in your country",
+            "unsupported url", "max_duration_exceeded", "max-filesize",
+        )):
+            return False
+        return any(part in lower for part in (
+            "timed out", "timeout", "connection reset", "connection aborted",
+            "network is unreachable", "remote end closed", "temporary failure",
+            "http error 500", "http error 502", "http error 503",
+            "http error 504", "server error", "unexpected eof",
+        ))
+
+    @staticmethod
     def _human_error(message: str) -> str:
         lower = message.lower()
         if "max_duration_exceeded" in lower:
             return "Видео слишком длинное для установленного лимита."
         if "live_stream_unsupported" in lower:
             return "Прямые трансляции не поддерживаются."
+        if any(part in lower for part in (
+            "sign in to confirm you're not a bot", "too many requests",
+            "http error 429", "rate limit",
+        )):
+            return (
+                "YouTube временно ограничил запросы сервера. "
+                "Попробуйте позже, проверьте подключение/VPN."
+            )
         if "private" in lower or "login required" in lower or "sign in" in lower:
-            return "Контент приватный или требует авторизации."
+            return (
+                "Сервис не предоставил доступ к видео (приватность или авторизация). "
+                "Если видео публичное, попробуйте позже."
+            )
         if "geo" in lower or "country" in lower or "region" in lower:
             return "Контент недоступен в этом регионе."
         if "larger than" in lower or "max-filesize" in lower:
-            return "Размер файла превышает лимит."
+            return "Размер файла превышает установленный лимит."
         if "unsupported url" in lower:
             return "Сервис или тип ссылки пока не поддерживается."
-        return "Не удалось скачать файл: контент удален, недоступен или временно ограничен."
+        if MediaDownloader._should_retry(message):
+            return "Временная ошибка сети или медиасервиса после повтора. Попробуйте позже."
+        return (
+            "Не удалось получить файл. Причина может быть во временной "
+            "недоступности сервиса или ограничениях самого видео."
+        )
 
     @staticmethod
     async def _shift_tempo(source: Path, factor: float, label: str) -> Path:

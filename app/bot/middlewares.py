@@ -26,7 +26,7 @@ def is_download_request(event: TelegramObject) -> bool:
     if isinstance(event, Message):
         return event.chat.type == "private" and bool(event.text and LINK_RE.search(event.text))
     if isinstance(event, CallbackQuery):
-        return bool(event.data and event.data.startswith(("fmt:", "find:", "libplay:")))
+        return bool(event.data and event.data.startswith(("fmt:", "find:", "findall:", "libplay:", "plplay:")))
     return False
 
 class ThrottleMiddleware(BaseMiddleware):
