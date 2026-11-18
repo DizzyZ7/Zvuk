@@ -74,6 +74,7 @@ def library_keyboard(tracks: list[SavedTrack]) -> InlineKeyboardMarkup:
             InlineKeyboardButton(
                 text=("🎵 " + track.title)[:48], callback_data=f"libplay:{track.id}",
             ),
+            InlineKeyboardButton(text="➕", callback_data=f"libpls:{track.id}"),
             InlineKeyboardButton(text="🗑", callback_data=f"libdel:{track.id}"),
         ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
