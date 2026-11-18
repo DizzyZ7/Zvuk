@@ -15,7 +15,8 @@ from app.core.telegram import make_bot
 from app.services.ad_manager import AdManager
 from app.services.media_downloader import MediaDownloadError, MediaDownloader
 from app.services.queue import (
-    BROADCAST_STREAM, DOWNLOAD_STREAM, GROUP, ensure_groups, release_lock,
+    BROADCAST_STREAM, DOWNLOAD_STREAM, GROUP, STALE_AFTER_MS, acknowledge,
+    ensure_groups, keep_pending_alive, release_lock,
 )
 from app.services.repository import Repository
 from app.services.urls import parse_media_url
@@ -210,9 +211,9 @@ class Worker:
         consumer = f"{self.consumer}-{concurrency_id}"
         while True:
             try:
-                # Reclaim only significantly stale entries; active downloads can take a while.
+                # Reclaim abandoned jobs after 3 minutes; live jobs renew PEL every 45s.
                 stale = await self.redis.xautoclaim(
-                    stream, GROUP, consumer, min_idle_time=10800000,
+                    stream, GROUP, consumer, min_idle_time=STALE_AFTER_MS,
                     start_id="0-0", count=1,
                 )
                 messages = stale[1] if len(stale) > 1 else []
@@ -224,18 +225,19 @@ class Worker:
                 for event_id, payload in messages:
                     job_id = payload.get("job_id")
                     if not job_id:
-                        await self.redis.xack(stream, GROUP, event_id)
+                        await acknowledge(self.redis, stream, event_id)
                         continue
                     try:
-                        if stream == DOWNLOAD_STREAM:
-                            await self.process_download(job_id)
-                        else:
-                            await self.process_broadcast(job_id)
+                        async with keep_pending_alive(self.redis, stream, consumer, event_id):
+                            if stream == DOWNLOAD_STREAM:
+                                await self.process_download(job_id)
+                            else:
+                                await self.process_broadcast(job_id)
                     except Exception:
                         # Do not ACK infrastructure failures; reclaim after timeout.
                         log.exception("Worker crashed handling %s %s", stream, job_id)
                     else:
-                        await self.redis.xack(stream, GROUP, event_id)
+                        await acknowledge(self.redis, stream, event_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
