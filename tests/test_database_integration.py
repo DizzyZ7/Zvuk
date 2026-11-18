@@ -85,3 +85,40 @@ async def test_campaign_limit_and_deliveries():
     assert await repo.set_campaign_enabled(cid, enabled=False)
     campaigns = await repo.list_campaigns()
     assert any(c.id == cid and c.impressions == 2 for c in campaigns)
+
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_playlists_are_private_and_track_urls_are_deduplicated():
+    from app.services.playlists import PlaylistService
+
+    ids = [10_000_000_004, 10_000_000_005]
+    async with session_factory.begin() as session:
+        session.add_all(User(id=uid) for uid in ids)
+    playlists = PlaylistService(session_factory)
+    created = await playlists.create(ids[0], "My favorites")
+    track = parse_media_url("https://youtu.be/dQw4w9WgXcQ")
+    assert await playlists.add(ids[0], created.id, track, title="Demo")
+    assert await playlists.add(ids[0], created.id, track, title="Demo")
+    assert len(await playlists.tracks(ids[0], created.id)) == 1
+    assert await playlists.get(ids[1], created.id) is None
+    assert not await playlists.add(ids[1], created.id, track, title="Stolen")
+    assert not await playlists.tracks(ids[1], created.id)
+    song = (await playlists.tracks(ids[0], created.id))[0]
+    assert await playlists.track(ids[1], song.id) is None
+    assert not await playlists.remove_track(ids[1], song.id)
+    assert await playlists.remove_track(ids[0], song.id)
+    assert await playlists.delete(ids[0], created.id)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_cash_ledger_reports_only_actual_rub_entries():
+    from app.services.cash_ledger import CashLedger
+
+    ledger = CashLedger(session_factory)
+    await ledger.add("income", 2000, "Advertising", "Test invoice")
+    await ledger.add("expense", 850, "Hosting", "VPS")
+    income, expenses, entries = await ledger.month()
+    assert income == 2000
+    assert expenses == 850
+    assert {e.category for e in entries} == {"Hosting", "Advertising"}
