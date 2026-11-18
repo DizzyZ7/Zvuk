@@ -14,11 +14,12 @@ from app.core.config import Settings
 from app.services.ad_manager import AdManager
 from app.services.media_downloader import AUDIO_KINDS
 from app.services.music_search import MusicSearch, MusicSearchError
-from app.services.queue import enqueue_download, release_lock
+from app.services.queue import enqueue_download
 from app.services.search_sessions import (
-    MAX_BATCH_PER_TAP, PAGE_SIZE, SearchSessionError,
-    create_search, lock_key, mark_selected, read_search, selected_indices,
+    PAGE_SIZE, SearchSessionError, create_search, read_search,
 )
+from app.bot.search_ui import render_search
+
 from app.services.repository import Repository
 from app.services.urls import InvalidMediaURL, MediaURL, cache_key, find_media_url, parse_media_url
 from app.services.user_service import UserService
@@ -33,63 +34,77 @@ async def start(message: Message, users: UserService) -> None:
     from app.bot.menu import home_keyboard
 
     await message.answer(
-        "Привет! Отправь ссылку на YouTube, VK, Rutube, TikTok, "
-        "Яндекс.Музыку, Spotify, Instagram или Pinterest. "
-        "Можешь также написать название песни или исполнителя. "
-        "Пришли голосовое, аудио, видео или кружок для распознавания музыки. "
-        "Аудиофрагмент для распознавания отправляется сервису AudD. "
-        "Скачивай только контент, на использование которого у тебя есть права.",
+        "🎧 ZVUK  ·  Твоя музыка\n\n"
+        "Ищи исполнителя или трек обычным сообщением. "
+        "Одна подборка — сколько угодно разных песен из списка.\n\n"
+        "🔎 Поиск   ·   🎼 Плейлисты   ·   ⭐ Избранное\n"
+        "Отправь ссылку или аудиофрагмент для распознавания.\n\n"
+        "Используй только материалы, на которые у тебя есть права.",
         reply_markup=home_keyboard(),
     )
 
 async def dispatch_download(
     bot: Bot, chat_id: int, user_id: int, media: MediaURL, kind: str,
     repo: Repository, redis: Redis, ads: AdManager, settings: Settings,
+    *, notify_rejection: bool = True,
 ) -> str:
+    """Reserve a download in PostgreSQL before touching Redis or YouTube.
+
+    A completed or in-progress file is always rejected for the same user and
+    output format. First-time requests may reuse a global cached Telegram file.
+    """
     owner_id = user_id if settings.ytdlp_cookies and user_id in settings.admin_ids else None
     key = cache_key(media, kind, owner_id=owner_id)
-    cached = await repo.cache_get(key)
-    if cached:
-        placement = await ads.placement(user_id)
-        try:
-            if kind in AUDIO_KINDS:
-                await bot.send_audio(chat_id, audio=cached, caption=placement.caption)
-            else:
-                await bot.send_video(chat_id, video=cached, caption=placement.caption)
-            await ads.delivered(placement)
-            history_id = await repo.new_download(user_id, media.url, key, kind)
-            await repo.update_download(history_id, "success", cache_hit=True)
-            return "cached"
-        except TelegramBadRequest as exc:
-            if "wrong file" in str(exc).lower() or "invalid file" in str(exc).lower():
-                await repo.cache_drop(key)
-            else:
-                raise
-    # Cross-instance admission lock keeps concurrent callbacks from bypassing
-    # the per-user pending limit. No row in the queue is made for a rejected item.
-    token = uuid4().hex
-    admission_key = f"queue-admission:{user_id}"
-    acquired = await redis.set(admission_key, token, nx=True, ex=30)
-    if not acquired:
-        await bot.send_message(chat_id, "⏳ Другой запрос уже ставится в очередь. Повторите позже.")
-        return "busy"
+    status, job_id = await repo.reserve_download(
+        user_id, media.url, key, kind, settings.max_pending_per_user,
+    )
+    if status != "reserved":
+        if notify_rejection:
+            await bot.send_message(chat_id, download_status_message(status, settings))
+        return status
+    assert job_id is not None
     try:
-        if await repo.pending_downloads(user_id) >= settings.max_pending_per_user:
-            await bot.send_message(
-                chat_id, f"⏳ В очереди уже {settings.max_pending_per_user} задачи. "
-                "Дождитесь завершения одной из них."
-            )
-            return "limit"
-        job_id = await repo.new_download(user_id, media.url, key, kind)
-        try:
-            await enqueue_download(redis, job_id)
-        except Exception:
-            await repo.update_download(job_id, "failed", "Не удалось поставить задачу в очередь")
-            raise
-    finally:
-        await release_lock(redis, admission_key, token)
-    await bot.send_message(chat_id, "⏳ Задача добавлена в очередь. Пришлю файл сюда.")
+        cached = await repo.cache_get(key)
+        if cached:
+            placement = await ads.placement(user_id)
+            try:
+                if kind in AUDIO_KINDS:
+                    await bot.send_audio(chat_id, audio=cached, caption=placement.caption)
+                else:
+                    await bot.send_video(chat_id, video=cached, caption=placement.caption)
+            except TelegramBadRequest as exc:
+                if "wrong file" in str(exc).lower() or "invalid file" in str(exc).lower():
+                    await repo.cache_drop(key)
+                else:
+                    raise
+            else:
+                await repo.update_download(job_id, "success", cache_hit=True)
+                await ads.delivered(placement)
+                return "cached"
+        await enqueue_download(redis, job_id)
+    except Exception:
+        # The reservation must never become an orphaned queued row.
+        log.exception("Failed to dispatch reserved download %s", job_id)
+        await repo.update_download(
+            job_id, "failed", "Не удалось подготовить загрузку",
+        )
+        raise
+    await bot.send_message(chat_id, "⏳ В очереди. Отправлю файл, когда он будет готов.")
     return "queued"
+
+
+def download_status_message(status: str, settings: Settings) -> str:
+    if status == "downloaded":
+        return "✅ Этот файл уже отправлялся тебе. Повторная загрузка отключена."
+    if status == "pending":
+        return "⏳ Этот файл уже скачивается или ожидает отправки."
+    if status == "limit":
+        return (
+            f"🕓 Сейчас доступно не больше {settings.max_pending_per_user} "
+            "ожидающих треков. Дождись одного из них и выбери следующий."
+        )
+    return "⚠️ Запрос не удалось принять. Попробуй еще раз."
+
 
 @router.message(F.chat.type == "private", F.text)
 async def handle_link(
@@ -119,12 +134,12 @@ async def handle_link(
                 "Ничего не нашел. Попробуйте указать название песни и исполнителя."
             )
             return
-        token = await create_search(redis, message.from_user.id, results)
+        token = await create_search(redis, message.from_user.id, results,
+                                    query=message.text)
+        states = await _search_download_states(repo, results, message.from_user.id, settings)
         await progress.edit_text(
-            f"🎵 Найдено {len(results)} записей. Можно скачать несколько треков, "
-            "сохранить в плейлист или использовать кнопку пакетной загрузки. "
-            "Результаты доступны 30 минут.",
-            reply_markup=search_keyboard(token, results),
+            render_search(results, message.text, page=0, states=states),
+            reply_markup=search_keyboard(token, results, states=states),
         )
         return
     await users.register(message.from_user)
@@ -134,7 +149,8 @@ async def handle_link(
         ex=3600,
     )
     await message.answer(
-        "Выберите формат или скорость:",
+        "🎚 Выбери формат — MP3, MP4 или другую скорость.\n"
+        "Повторно уже полученный формат не отправляется:",
         reply_markup=format_keyboard(token, allow_video=media.default_kind is None),
     )
 
@@ -162,20 +178,37 @@ async def select_format(
     if media.default_kind and parts[2] == "video":
         await callback.answer("Для музыкальных ссылок доступно только аудио.", show_alert=True)
         return
-    # Consume only a VALID choice, so an invalid format does not invalidate the buttons.
-    consumed = await redis.getdel(f"choice:{parts[1]}")
-    if consumed is None:
-        await callback.answer("Формат уже выбран. Отправьте ссылку заново.", show_alert=True)
-        return
+    # Keep the choice alive: users may select a different format without
+    # resending the URL; PostgreSQL rejects duplicate delivery of each kind.
     await users.register(callback.from_user)
-    await callback.answer()
-    await dispatch_download(bot, callback.message.chat.id, callback.from_user.id,
-                            media, parts[2], repo, redis, ads, settings)
+    result = await dispatch_download(
+        bot, callback.message.chat.id, callback.from_user.id,
+        media, parts[2], repo, redis, ads, settings, notify_rejection=False,
+    )
+    await callback.answer(
+        download_status_message(result, settings)
+        if result not in {"queued", "cached"} else
+        ("✅ Отправлено из кэша." if result == "cached" else "⏳ Добавлено в очередь."),
+        show_alert=result in {"downloaded", "limit"},
+    )
+
+def _keys_for_results(results, user_id: int, settings: Settings) -> list[str]:
+    owner_id = user_id if settings.ytdlp_cookies and user_id in settings.admin_ids else None
+    return [cache_key(parse_media_url(r.url), "audio", owner_id=owner_id)
+            for r in results]
+
+
+async def _search_download_states(
+    repo: Repository, results, user_id: int, settings: Settings,
+) -> dict[int, str]:
+    keys = _keys_for_results(results, user_id, settings)
+    statuses = await repo.download_states(user_id, keys)
+    return {i: statuses[key] for i, key in enumerate(keys) if key in statuses}
+
 
 async def _search_callback_context(
     callback: CallbackQuery, redis: Redis, token: str,
 ):
-    """Validate user ownership before permitting a fetch, batch or page change."""
     if not callback.from_user or not isinstance(callback.message, Message):
         await callback.answer("Сообщение недоступно.", show_alert=True)
         return None
@@ -186,48 +219,21 @@ async def _search_callback_context(
         return None
 
 
-async def _refresh_search_keyboard(
-    callback: CallbackQuery, redis: Redis, token: str, results,
-    *, page: int = 0,
+async def _refresh_search(
+    callback: CallbackQuery, token: str, session,
+    repo: Repository, settings: Settings, *, page: int = 0,
 ) -> None:
-    selected = await selected_indices(redis, token)
-    await callback.message.edit_reply_markup(
-        reply_markup=search_keyboard(token, results, page=page, selected=selected),
+    states = await _search_download_states(
+        repo, session.results, callback.from_user.id, settings,
     )
-
-
-async def _submit_search_results(
-    callback: CallbackQuery, token: str, indices: list[int],
-    bot: Bot, redis: Redis, repo: Repository, ads: AdManager, settings: Settings,
-    results, *, allow_repeat: bool = False,
-) -> tuple[int, int]:
-    lock = lock_key(token)
-    owner = uuid4().hex
-    acquired = await redis.set(lock, owner, ex=90, nx=True)
-    if not acquired:
-        await callback.answer("⏳ Предыдущий выбор еще обрабатывается.")
-        return 0, 0
-    accepted = 0
-    exhausted = 0
     try:
-        already = await selected_indices(redis, token)
-        for index in indices:
-            if index in already and not allow_repeat:
-                continue
-            media = parse_media_url(results[index].url)
-            result = await dispatch_download(
-                bot, callback.message.chat.id, callback.from_user.id,
-                media, "audio", repo, redis, ads, settings,
-            )
-            if result in {"queued", "cached"}:
-                await mark_selected(redis, token, index)
-                accepted += 1
-            elif result in {"limit", "busy"}:
-                exhausted += 1
-                break
-        return accepted, exhausted
-    finally:
-        await release_lock(redis, lock, owner)
+        await callback.message.edit_text(
+            render_search(session.results, session.query, page=page, states=states),
+            reply_markup=search_keyboard(token, session.results, page=page, states=states),
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
 
 
 @router.callback_query(F.data.startswith("find:"))
@@ -244,73 +250,35 @@ async def select_search_result(
     if session is None:
         return
     try:
-        session.get(index)
+        media = parse_media_url(session.get(index).url)
     except SearchSessionError as exc:
         await callback.answer(str(exc), show_alert=True)
         return
-    already = index in await selected_indices(redis, token)
-    if already:
-        # A previously queued track may fail at the provider; allow users to
-        # retry it from the same results, but prevent rapid double clicks.
-        retry_key = f"search:retry:{token}:{callback.from_user.id}:{index}"
-        if not await redis.set(retry_key, "1", ex=8, nx=True):
-            await callback.answer("Трек уже запрошен. Попробуйте чуть позже.")
-            return
+    # No Redis selection set or download lock: a single transactional PG
+    # reservation rejects repeats, even across different search sessions.
     await users.register(callback.from_user)
-    accepted, blocked = await _submit_search_results(
-        callback, token, [index], bot, redis, repo, ads, settings,
-        session.results, allow_repeat=already,
+    result = await dispatch_download(
+        bot, callback.message.chat.id, callback.from_user.id,
+        media, "audio", repo, redis, ads, settings, notify_rejection=False,
     )
-    if accepted:
-        await _refresh_search_keyboard(
-            callback, redis, token, session.results, page=index // PAGE_SIZE,
-        )
-        await callback.answer("🎵 Трек отправляется!")
-    elif not blocked:
-        # The lock handler has already acknowledged the callback.
-        return
-    else:
-        await callback.answer("Освободите место в очереди.", show_alert=True)
-
-
-@router.callback_query(F.data.startswith("findall:"))
-async def select_search_batch(
-    callback: CallbackQuery, bot: Bot, redis: Redis, repo: Repository,
-    users: UserService, ads: AdManager, settings: Settings,
-) -> None:
-    parts = (callback.data or "").split(":")
-    if len(parts) != 2:
-        await callback.answer("Некорректная кнопка.", show_alert=True)
-        return
-    token = parts[1]
-    session = await _search_callback_context(callback, redis, token)
-    if session is None:
-        return
-    selected = await selected_indices(redis, token)
-    remaining = [i for i in range(len(session.results)) if i not in selected]
-    if not remaining:
-        await callback.answer("Все треки из этого поиска уже отправлены.")
-        return
-    await users.register(callback.from_user)
-    # Never queue more than three from a single button tap.
-    accepted, blocked = await _submit_search_results(
-        callback, token, remaining[:MAX_BATCH_PER_TAP],
-        bot, redis, repo, ads, settings, session.results,
-    )
-    if accepted:
-        await _refresh_search_keyboard(callback, redis, token, session.results)
-        rest = len(remaining) - accepted
+    if result in {"downloaded", "pending", "limit"}:
         await callback.answer(
-            f"✅ Выбрано {accepted}. " +
-            (f"Еще {rest}: нажмите кнопку позже." if rest else "Готово."),
+            download_status_message(result, settings),
+            show_alert=result in {"downloaded", "limit"},
         )
-    elif blocked:
-        await callback.answer("Очередь заполнена. Попробуйте после завершения загрузок.")
-    # Otherwise already acknowledged by the lock handler.
+    else:
+        await callback.answer(
+            "✅ Отправлено!" if result == "cached" else "⏳ Добавлено в очередь.",
+        )
+    await _refresh_search(
+        callback, token, session, repo, settings, page=index // PAGE_SIZE,
+    )
 
 
 @router.callback_query(F.data.startswith("searchpage:"))
-async def browse_search_page(callback: CallbackQuery, redis: Redis) -> None:
+async def browse_search_page(
+    callback: CallbackQuery, redis: Redis, repo: Repository, settings: Settings,
+) -> None:
     parts = (callback.data or "").split(":")
     if len(parts) != 3 or not parts[2].isdigit():
         await callback.answer("Некорректная страница.", show_alert=True)
@@ -323,7 +291,7 @@ async def browse_search_page(callback: CallbackQuery, redis: Redis) -> None:
     if page > max_page:
         await callback.answer("Такой страницы нет.", show_alert=True)
         return
-    await _refresh_search_keyboard(callback, redis, token, session.results, page=page)
+    await _refresh_search(callback, token, session, repo, settings, page=page)
     await callback.answer()
 
 

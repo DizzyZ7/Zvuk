@@ -2,6 +2,8 @@ import asyncio
 import logging
 
 from aiogram import Dispatcher
+from aiogram.exceptions import TelegramAPIError
+from aiogram.types import BotCommand
 from aiogram.fsm.storage.redis import RedisStorage
 from app.bot import admin, campaigns, economics, handlers, legal, library, menu, playlists, premium, recognition
 from app.bot.middlewares import SponsorMiddleware, ThrottleMiddleware
@@ -44,6 +46,19 @@ async def main() -> None:
     try:
         await redis.ping()
         await bot.delete_webhook(drop_pending_updates=False)
+        try:
+            await bot.set_my_commands([
+                BotCommand(command="start", description="Открыть Zvuk"),
+                BotCommand(command="menu", description="Главное меню"),
+                BotCommand(command="library", description="Избранные треки"),
+                BotCommand(command="playlists", description="Мои плейлисты"),
+                BotCommand(command="playlist", description="Создать плейлист или добавить песню"),
+                BotCommand(command="fragment", description="Поиск песни по фразе"),
+                BotCommand(command="premium", description="Статус и возможности Premium"),
+                BotCommand(command="help", description="Как пользоваться ботом"),
+            ])
+        except TelegramAPIError:
+            logging.getLogger(__name__).warning("Cannot update Telegram command menu")
         await dp.start_polling(
             bot, settings=settings, redis=redis, repo=repo,
             ads=AdManager(repo), users=UserService(repo), music_search=MusicSearch(),

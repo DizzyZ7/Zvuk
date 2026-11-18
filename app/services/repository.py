@@ -58,6 +58,64 @@ class Repository:
                                         cache_key=key, kind=kind, status="queued"))
         return job_id
 
+    async def reserve_download(
+        self, user_id: int, url: str, key: str, kind: str, max_pending: int,
+    ) -> tuple[str, str | None]:
+        """Atomically reject a user's completed/active duplicate, or reserve a slot.
+
+        A PostgreSQL advisory transaction lock per Telegram user serializes
+        concurrent requests across processes, including different tracks.
+        This replaces temporary Redis admission/selection locks.
+        """
+        async with self.factory.begin() as session:
+            await session.execute(select(func.pg_advisory_xact_lock(user_id)))
+            rows = (await session.scalars(
+                select(DownloadHistory.status).where(
+                    DownloadHistory.user_id == user_id,
+                    DownloadHistory.cache_key == key,
+                    DownloadHistory.status.in_(("success", "queued", "processing")),
+                ),
+            )).all()
+            if "success" in rows:
+                return "downloaded", None
+            if "queued" in rows or "processing" in rows:
+                return "pending", None
+            active = await session.scalar(
+                select(func.count()).select_from(DownloadHistory).where(
+                    DownloadHistory.user_id == user_id,
+                    DownloadHistory.status.in_(("queued", "processing")),
+                ),
+            )
+            if int(active or 0) >= max_pending:
+                return "limit", None
+            job_id = uuid4().hex
+            session.add(DownloadHistory(
+                id=job_id, user_id=user_id, url=url, cache_key=key,
+                kind=kind, status="queued",
+            ))
+            return "reserved", job_id
+
+    async def download_states(self, user_id: int, keys: list[str]) -> dict[str, str]:
+        """One PostgreSQL query for statuses of the current search page."""
+        if not keys:
+            return {}
+        if len(keys) > 20:
+            raise ValueError("Too many status keys")
+        priority = {"success": 3, "processing": 2, "queued": 1}
+        async with self.factory() as session:
+            rows = (await session.execute(
+                select(DownloadHistory.cache_key, DownloadHistory.status).where(
+                    DownloadHistory.user_id == user_id,
+                    DownloadHistory.cache_key.in_(keys),
+                    DownloadHistory.status.in_(tuple(priority)),
+                ),
+            )).all()
+        result: dict[str, str] = {}
+        for key, status in rows:
+            if priority[status] > priority.get(result.get(key, ""), 0):
+                result[key] = status
+        return result
+
     async def pending_downloads(self, user_id: int) -> int:
         async with self.factory() as session:
             count = await session.scalar(

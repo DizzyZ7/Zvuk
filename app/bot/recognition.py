@@ -13,6 +13,9 @@ from redis.asyncio import Redis
 from redis.exceptions import RedisError
 
 from app.bot.keyboards import search_keyboard
+from app.bot.handlers import _search_download_states
+from app.bot.search_ui import render_search
+from app.services.repository import Repository
 from app.core.config import Settings
 from app.services.music_search import MusicSearch, MusicSearchError
 from app.services.premium import PremiumService
@@ -75,6 +78,7 @@ async def recognize_file(
 async def recognize_message(
     message: Message, bot: Bot, redis: Redis, settings: Settings,
     users: UserService, premium: PremiumService, music_search: MusicSearch,
+    repo: Repository,
 ) -> None:
     if not message.from_user:
         return
@@ -157,10 +161,12 @@ async def recognize_message(
                 text + "\nПодходящей общедоступной записи пока не найдено."
             )
             return
-        search_token = await create_search(redis, user_id, matches)
+        search_token = await create_search(redis, user_id, matches, query=f"{result.artist} — {result.title}")
+        states = await _search_download_states(repo, matches, user_id, settings)
         await status.edit_text(
-            text + "\nВот похожие записи из поиска:",
-            reply_markup=search_keyboard(search_token, matches),
+            text + "\n\n" +
+            render_search(matches, f"{result.artist} — {result.title}", states=states),
+            reply_markup=search_keyboard(search_token, matches, states=states),
         )
     except RedisError:
         log.exception("Redis quota/lock service unavailable for recognition")
