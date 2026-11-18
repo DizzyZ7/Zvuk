@@ -56,6 +56,16 @@ class Repository:
                                         cache_key=key, kind=kind, status="queued"))
         return job_id
 
+    async def pending_downloads(self, user_id: int) -> int:
+        async with self.factory() as session:
+            count = await session.scalar(
+                select(func.count()).select_from(DownloadHistory).where(
+                    DownloadHistory.user_id == user_id,
+                    DownloadHistory.status.in_(("queued", "processing")),
+                )
+            )
+            return int(count or 0)
+
     async def download(self, job_id: str) -> DownloadHistory | None:
         async with self.factory() as session:
             return await session.get(DownloadHistory, job_id)
@@ -139,6 +149,24 @@ class Repository:
                                   total=total, status="queued"))
         return job_id
 
+    async def broadcast_active(self) -> bool:
+        async with self.factory() as session:
+            active = await session.scalar(select(Broadcast.id).where(
+                Broadcast.status.in_(("queued", "running"))
+            ).limit(1))
+            return active is not None
+
+    async def cancel_broadcast(self, job_id: str, admin_id: int) -> bool:
+        async with self.factory.begin() as session:
+            result = await session.execute(
+                update(Broadcast)
+                .where(Broadcast.id == job_id, Broadcast.admin_id == admin_id,
+                       Broadcast.status.in_(("queued", "running")))
+                .values(status="cancelled")
+                .returning(Broadcast.id)
+            )
+            return result.scalar_one_or_none() is not None
+
     async def get_broadcast(self, job_id: str) -> Broadcast | None:
         async with self.factory() as session:
             return await session.get(Broadcast, job_id)
@@ -147,16 +175,22 @@ class Repository:
         self, job_id: str, processed: int, failed: int, last_user_id: int, status: str,
     ) -> None:
         async with self.factory.begin() as session:
-            await session.execute(update(Broadcast).where(Broadcast.id == job_id).values(
-                processed=processed, failed=failed, last_user_id=last_user_id, status=status,
-            ))
+            await session.execute(
+                update(Broadcast)
+                .where(Broadcast.id == job_id, Broadcast.status.not_in_(("cancelled", "failed")))
+                .values(processed=processed, failed=failed, last_user_id=last_user_id, status=status)
+            )
 
-    async def users_after(self, after: int, limit: int = 100) -> list[int]:
+    async def users_after(
+        self, after: int, limit: int = 100, *, created_before: datetime | None = None,
+    ) -> list[int]:
         async with self.factory() as session:
-            return list((await session.scalars(
-                select(User.id).where(User.id > after, User.is_blocked.is_(False))
-                .order_by(User.id).limit(limit)
-            )).all())
+            query = select(User.id).where(
+                User.id > after, User.is_blocked.is_(False),
+            )
+            if created_before is not None:
+                query = query.where(User.created_at <= created_before)
+            return list((await session.scalars(query.order_by(User.id).limit(limit))).all())
 
     async def user_block(self, user_id: int) -> None:
         async with self.factory.begin() as session:

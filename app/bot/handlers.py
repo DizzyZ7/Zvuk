@@ -51,6 +51,12 @@ async def dispatch_download(
                 await repo.cache_drop(key)
             else:
                 raise
+    if await repo.pending_downloads(user_id) >= settings.max_pending_per_user:
+        await bot.send_message(
+            chat_id, f"⏳ В очереди уже {settings.max_pending_per_user} задачи. "
+            "Дождитесь завершения одной из них."
+        )
+        return
     job_id = await repo.new_download(user_id, media.url, key, kind)
     try:
         await enqueue_download(redis, job_id)

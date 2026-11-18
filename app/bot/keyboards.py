@@ -13,6 +13,19 @@ def subscribe_keyboard(channels: list[SponsorChannel]) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton(text="✅ Проверить подписку", callback_data="sub:check")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
+def broadcast_confirmation() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Запустить рассылку", callback_data="adm:bc:send"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data="adm:bc:cancel"),
+    ]])
+
+
+def broadcast_stop_keyboard(job_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🛑 Остановить рассылку", callback_data=f"adm:bcancel:{job_id}"),
+    ]])
+
+
 def admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="adm:stats")],

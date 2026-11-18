@@ -20,7 +20,10 @@ class MediaCache(Base):
 
 class DownloadHistory(Base):
     __tablename__ = "download_history"
-    __table_args__ = (Index("ix_download_history_user_created", "user_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_download_history_user_created", "user_id", "created_at"),
+        Index("ix_download_history_user_status", "user_id", "status"),
+    )
     id: Mapped[str] = mapped_column(String(32), primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
     url: Mapped[str] = mapped_column(Text, nullable=False)

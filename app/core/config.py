@@ -19,6 +19,7 @@ class Settings(BaseSettings):
     max_file_mb: int = Field(default=1990, ge=1, le=1999)
     max_duration_sec: int = Field(default=1800, ge=60, le=14400)
     worker_concurrency: int = Field(default=2, ge=1, le=16)
+    max_pending_per_user: int = Field(default=3, ge=1, le=20)
     log_level: str = "INFO"
 
     @field_validator("admin_ids", mode="before")

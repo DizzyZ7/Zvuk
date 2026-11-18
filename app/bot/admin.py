@@ -10,7 +10,7 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from redis.asyncio import Redis
 
-from app.bot.keyboards import admin_keyboard
+from app.bot.keyboards import admin_keyboard, broadcast_confirmation, broadcast_stop_keyboard
 from app.core.config import Settings
 from app.services.queue import enqueue_broadcast
 from app.services.repository import Repository
@@ -32,6 +32,7 @@ class AdminState(StatesGroup):
     adding_channel = State()
     editing_ad = State()
     broadcasting = State()
+    confirm_broadcast = State()
 
 @router.message(Command("admin"))
 async def admin_menu(message: Message, state: FSMContext) -> None:
@@ -160,13 +161,48 @@ async def prompt_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 @router.message(AdminState.broadcasting)
-async def launch_broadcast(
-    message: Message, state: FSMContext, repo: Repository, redis: Redis,
-) -> None:
+async def preview_broadcast(message: Message, state: FSMContext) -> None:
     if not message.from_user:
         return
-    progress = await message.answer("📨 Рассылка поставлена в очередь: 0%")
-    job_id = await repo.new_broadcast(message.from_user.id, message.message_id, progress.message_id)
+    await state.update_data(source_message_id=message.message_id)
+    await state.set_state(AdminState.confirm_broadcast)
+    await message.answer(
+        "📨 Сообщение выше будет отправлено пользователям. Подтвердите запуск: "
+        "отменить уже доставленные сообщения невозможно.",
+        reply_markup=broadcast_confirmation(),
+    )
+
+
+@router.callback_query(AdminState.confirm_broadcast, F.data == "adm:bc:cancel")
+async def abandon_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text("Рассылка не запускалась.")
+    await callback.answer("Отменено")
+
+
+@router.callback_query(AdminState.confirm_broadcast, F.data == "adm:bc:send")
+async def launch_broadcast(
+    callback: CallbackQuery, state: FSMContext, repo: Repository, redis: Redis,
+) -> None:
+    if not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    if await repo.broadcast_active():
+        await callback.answer("Другая рассылка уже выполняется.", show_alert=True)
+        return
+    data = await state.get_data()
+    source_id = data.get("source_message_id")
+    if not isinstance(source_id, int):
+        await callback.answer("Предпросмотр устарел. Начните заново.", show_alert=True)
+        await state.clear()
+        return
+    progress = await callback.message.answer("📨 Рассылка поставлена в очередь: 0%")
+    job_id = await repo.new_broadcast(callback.from_user.id, source_id, progress.message_id)
+    await progress.edit_text(
+        "📨 Рассылка поставлена в очередь: 0%",
+        reply_markup=broadcast_stop_keyboard(job_id),
+    )
     try:
         await enqueue_broadcast(redis, job_id)
     except Exception:
@@ -174,4 +210,20 @@ async def launch_broadcast(
         await progress.edit_text("Не удалось поставить рассылку в очередь.")
         raise
     await state.clear()
-    await message.answer("Меню:", reply_markup=admin_keyboard())
+    await callback.message.edit_text("✅ Рассылка запущена. Прогресс — в сообщении ниже.")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("adm:bcancel:"))
+async def stop_broadcast(callback: CallbackQuery, repo: Repository) -> None:
+    job_id = (callback.data or "").removeprefix("adm:bcancel:")
+    if len(job_id) != 32 or any(c not in "0123456789abcdef" for c in job_id):
+        await callback.answer("Некорректный идентификатор.", show_alert=True)
+        return
+    cancelled = await repo.cancel_broadcast(job_id, callback.from_user.id)
+    if not cancelled:
+        await callback.answer("Рассылка уже завершена или недоступна.", show_alert=True)
+        return
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text("🛑 Рассылка остановлена. Уже отправленные сообщения останутся у получателей.")
+    await callback.answer("Остановлено")
