@@ -122,3 +122,113 @@ async def test_cash_ledger_reports_only_actual_rub_entries():
     assert income == 2000
     assert expenses == 850
     assert {e.category for e in entries} == {"Hosting", "Advertising"}
+
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_download_reservation_skips_success_and_active_duplicates():
+    from app.services.urls import cache_key
+
+    uid = 10_000_000_006
+    async with session_factory.begin() as session:
+        session.add(User(id=uid))
+    repo = Repository(session_factory, redis=None)
+    media = parse_media_url("https://youtu.be/dQw4w9WgXcQ")
+    key = cache_key(media, "audio")
+
+    status, job = await repo.reserve_download(uid, media.url, key, "audio", 5)
+    assert status == "reserved"
+    assert job
+    assert await repo.download_states(uid, [key]) == {key: "queued"}
+    assert await repo.reserve_download(uid, media.url, key, "audio", 5) == (
+        "pending", None,
+    )
+    await repo.update_download(job, "processing")
+    assert await repo.reserve_download(uid, media.url, key, "audio", 5) == (
+        "pending", None,
+    )
+    await repo.update_download(job, "success")
+    assert await repo.download_states(uid, [key]) == {key: "success"}
+    assert await repo.reserve_download(uid, media.url, key, "audio", 5) == (
+        "downloaded", None,
+    )
+    # MP4 is a different output format and may be downloaded once separately.
+    other_status, other_job = await repo.reserve_download(
+        uid, media.url, cache_key(media, "video"), "video", 5,
+    )
+    assert other_status == "reserved" and other_job
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_failed_download_can_be_retried():
+    from app.services.urls import cache_key
+
+    uid = 10_000_000_007
+    async with session_factory.begin() as session:
+        session.add(User(id=uid))
+    repo = Repository(session_factory, redis=None)
+    media = parse_media_url("https://youtu.be/abcdefghijk")
+    key = cache_key(media, "audio")
+    status, job = await repo.reserve_download(uid, media.url, key, "audio", 5)
+    assert status == "reserved"
+    await repo.update_download(job, "failed", "temporary provider error")
+    status, another = await repo.reserve_download(uid, media.url, key, "audio", 5)
+    assert status == "reserved"
+    assert another != job
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_five_quick_distinct_tracks_are_allowed_but_sixth_waits():
+    import asyncio
+    from app.services.urls import cache_key
+
+    uid = 10_000_000_008
+    async with session_factory.begin() as session:
+        session.add(User(id=uid))
+    repo = Repository(session_factory, redis=None)
+    links = [
+        parse_media_url(f"https://www.youtube.com/watch?v={i:011d}")
+        for i in range(6)
+    ]
+    outcomes = await asyncio.gather(*[
+        repo.reserve_download(uid, media.url, cache_key(media, "audio"), "audio", 5)
+        for media in links
+    ])
+    assert sum(status == "reserved" for status, _ in outcomes) == 5
+    assert sum(status == "limit" for status, _ in outcomes) == 1
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_simultaneous_duplicate_callbacks_reserve_only_one_job():
+    import asyncio
+    from app.services.urls import cache_key
+
+    uid = 10_000_000_009
+    async with session_factory.begin() as session:
+        session.add(User(id=uid))
+    repo = Repository(session_factory, redis=None)
+    media = parse_media_url("https://youtu.be/abcdefghijk")
+    key = cache_key(media, "audio")
+    outcomes = await asyncio.gather(*[
+        repo.reserve_download(uid, media.url, key, "audio", 5)
+        for _ in range(6)
+    ])
+    assert sum(state == "reserved" for state, _ in outcomes) == 1
+    assert sum(state == "pending" for state, _ in outcomes) == 5
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_one_users_success_does_not_block_another_users_first_file():
+    from app.services.urls import cache_key
+
+    uid = 10_000_000_010
+    other = 10_000_000_011
+    async with session_factory.begin() as session:
+        session.add_all([User(id=uid), User(id=other)])
+    repo = Repository(session_factory, redis=None)
+    media = parse_media_url("https://youtu.be/abcdefghijk")
+    key = cache_key(media, "audio")
+    status, job = await repo.reserve_download(uid, media.url, key, "audio", 5)
+    assert status == "reserved"
+    await repo.update_download(job, "success")
+    assert (await repo.reserve_download(other, media.url, key, "audio", 5))[0] == "reserved"
