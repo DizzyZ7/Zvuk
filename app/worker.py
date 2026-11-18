@@ -95,11 +95,15 @@ class Worker:
                     hit = True
                 else:
                     with tempfile.TemporaryDirectory(prefix="zvuk_", dir="/shared") as folder:
+                        # The Local Bot API runs in another container and must be
+                        # able to traverse this temporary directory.
+                        Path(folder).chmod(0o755)
                         media = await self.downloader.download(
                             parse_media_url(job.url), kind, Path(folder),
                             use_auth_cookies=bool(settings.ytdlp_cookies and
                                                   job.user_id in settings.admin_ids),
                         )
+                        media.path.chmod(0o644)
                         file_id = await self.send_media(job.user_id, kind, media)
                         await self.repo.cache_put(key, file_id, kind)
                 await self.repo.update_download(job_id, "success", cache_hit=hit)
