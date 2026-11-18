@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 from app.core.database import Base
 
@@ -63,3 +63,61 @@ class Broadcast(Base):
     failed: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     last_user_id: Mapped[int] = mapped_column(BigInteger, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+class SavedTrack(Base):
+    __tablename__ = "saved_tracks"
+    __table_args__ = (UniqueConstraint("user_id", "url_hash", name="uq_saved_user_hash"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    url_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    artist: Mapped[str] = mapped_column(String(255), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
+class PremiumGrant(Base):
+    __tablename__ = "premium_grants"
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    valid_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class PremiumOrder(Base):
+    __tablename__ = "premium_orders"
+    payload: Mapped[str] = mapped_column(String(96), primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    stars: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+    paid_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PremiumPayment(Base):
+    __tablename__ = "premium_payments"
+    charge_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    order_payload: Mapped[str] = mapped_column(
+        ForeignKey("premium_orders.payload"), nullable=False, unique=True,
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    stars: Mapped[int] = mapped_column(Integer, nullable=False)
+    refunded: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
+
+
+class AdCampaign(Base):
+    __tablename__ = "ad_campaigns"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    label: Mapped[str] = mapped_column(String(255), nullable=False)
+    caption: Mapped[str] = mapped_column(Text, nullable=False)
+    target_url: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    impressions_limit: Mapped[int | None] = mapped_column(Integer)
+    impressions: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(),
+    )
