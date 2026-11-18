@@ -6,6 +6,7 @@ def test_youtube_short_and_watch_canonicalize():
     b = parse_media_url("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
     assert a == b
     assert cache_key(a, "audio") != cache_key(a, "video")
+    assert cache_key(a, "audio", owner_id=1) != cache_key(a, "audio", owner_id=2)
 
 def test_spotify_is_audio_only():
     media = parse_media_url("https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC?si=x")
