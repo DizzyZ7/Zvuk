@@ -37,7 +37,7 @@ def search_keyboard(
         downloaded = index in selected
         rows.append([
             InlineKeyboardButton(
-                text=("✅ " if downloaded else "🎧 ") + label[:38],
+                text=("🔁 " if downloaded else "🎧 ") + label[:38],
                 callback_data=f"find:{token}:{index}",
             ),
             InlineKeyboardButton(text="💾", callback_data=f"stash:{token}:{index}"),

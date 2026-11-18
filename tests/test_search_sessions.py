@@ -63,3 +63,50 @@ async def test_selections_are_independent_of_search_payload():
 def test_batch_capacity_and_page_size_are_bounded():
     assert PAGE_SIZE == 5
     assert MAX_BATCH_PER_TAP == 3
+
+
+
+def test_keyboard_pages_and_marks_retryable_previous_selection():
+    from app.bot.keyboards import search_keyboard
+
+    token = "abc0123456789def"
+    songs = [song(i) for i in range(10)]
+    page0 = search_keyboard(token, songs, selected={0})
+    assert page0.inline_keyboard[0][0].text.startswith("🔁")
+    assert page0.inline_keyboard[0][0].callback_data == f"find:{token}:0"
+    assert page0.inline_keyboard[-1][0].callback_data == f"findall:{token}"
+    page1 = search_keyboard(token, songs, page=1)
+    assert page1.inline_keyboard[0][0].callback_data == f"find:{token}:5"
+    assert any(btn.callback_data == f"searchpage:{token}:0"
+               for row in page1.inline_keyboard for btn in row)
+
+
+@pytest.mark.asyncio
+async def test_batch_selection_keeps_session_after_three_items():
+    from unittest.mock import patch
+    from app.bot.handlers import select_search_batch
+
+    session = SimpleNamespace(results=tuple(song(i) for i in range(10)))
+    user = SimpleNamespace(id=42)
+    cb = SimpleNamespace(
+        data="findall:abc0123456789def",
+        from_user=user,
+        message=SimpleNamespace(chat=SimpleNamespace(id=42)),
+        answer=AsyncMock(),
+    )
+    redis = SimpleNamespace()
+    with patch("app.bot.handlers._search_callback_context",
+               new=AsyncMock(return_value=session)):
+        with patch("app.bot.handlers.selected_indices",
+                   new=AsyncMock(return_value={0})):
+            with patch("app.bot.handlers._submit_search_results",
+                       new=AsyncMock(return_value=(3, 0))) as submit:
+                with patch("app.bot.handlers._refresh_search_keyboard",
+                           new=AsyncMock()):
+                    await select_search_batch(
+                        cb, SimpleNamespace(), redis, SimpleNamespace(),
+                        SimpleNamespace(register=AsyncMock()),
+                        SimpleNamespace(), SimpleNamespace(),
+                    )
+    assert submit.await_args.args[2] == [1, 2, 3]
+    cb.answer.assert_awaited_once()

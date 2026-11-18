@@ -199,7 +199,7 @@ async def _refresh_search_keyboard(
 async def _submit_search_results(
     callback: CallbackQuery, token: str, indices: list[int],
     bot: Bot, redis: Redis, repo: Repository, ads: AdManager, settings: Settings,
-    results,
+    results, *, allow_repeat: bool = False,
 ) -> tuple[int, int]:
     lock = lock_key(token)
     owner = uuid4().hex
@@ -212,7 +212,7 @@ async def _submit_search_results(
     try:
         already = await selected_indices(redis, token)
         for index in indices:
-            if index in already:
+            if index in already and not allow_repeat:
                 continue
             media = parse_media_url(results[index].url)
             result = await dispatch_download(
@@ -248,13 +248,18 @@ async def select_search_result(
     except SearchSessionError as exc:
         await callback.answer(str(exc), show_alert=True)
         return
-    if index in await selected_indices(redis, token):
-        await callback.answer("Этот трек уже отправляли из этого поиска.")
-        return
+    already = index in await selected_indices(redis, token)
+    if already:
+        # A previously queued track may fail at the provider; allow users to
+        # retry it from the same results, but prevent rapid double clicks.
+        retry_key = f"search:retry:{token}:{callback.from_user.id}:{index}"
+        if not await redis.set(retry_key, "1", ex=8, nx=True):
+            await callback.answer("Трек уже запрошен. Попробуйте чуть позже.")
+            return
     await users.register(callback.from_user)
     accepted, blocked = await _submit_search_results(
         callback, token, [index], bot, redis, repo, ads, settings,
-        session.results,
+        session.results, allow_repeat=already,
     )
     if accepted:
         await _refresh_search_keyboard(
