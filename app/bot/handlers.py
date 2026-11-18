@@ -27,7 +27,8 @@ async def start(message: Message, users: UserService) -> None:
         await users.register(message.from_user)
     await message.answer(
         "Привет! Отправь ссылку на YouTube, VK, Rutube, TikTok, "
-        "Яндекс.Музыку, Spotify, Instagram или Pinterest. "\n        "Можешь также написать название песни или исполнителя. "
+        "Яндекс.Музыку, Spotify, Instagram или Pinterest. "
+        "Можешь также написать название песни или исполнителя. "
         "Скачивай только контент, на использование которого у тебя есть права."
     )
 
