@@ -5,9 +5,14 @@ from pathlib import Path
 from uuid import uuid4
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
+from aiogram.exceptions import (
+    TelegramBadRequest, TelegramEntityTooLarge, TelegramForbiddenError,
+    TelegramNetworkError, TelegramRetryAfter, TelegramServerError,
+)
 from aiogram.types import FSInputFile
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
+from sqlalchemy.exc import SQLAlchemyError
 from app.bot.keyboards import broadcast_stop_keyboard
 from app.core.config import settings
 from app.core.database import engine, session_factory
@@ -23,6 +28,7 @@ from app.services.repository import Repository
 from app.services.urls import parse_media_url
 
 log = logging.getLogger(__name__)
+MAX_TRANSIENT_RETRIES = 3
 
 class Worker:
     def __init__(self, bot: Bot, redis: Redis, repo: Repository):
@@ -60,6 +66,12 @@ class Worker:
         if not sent.video:
             raise MediaDownloadError("Telegram не вернул ID видеофайла.")
         return sent.video.file_id
+
+    async def notify_failure(self, user_id: int, error: str) -> None:
+        try:
+            await self.bot.send_message(user_id, f"❌ {error[:800]}")
+        except Exception:
+            log.warning("Cannot notify user %s about failed job", user_id)
 
     async def process_download(self, job_id: str) -> None:
         job = await self.repo.download(job_id)
@@ -111,16 +123,33 @@ class Worker:
                 await self.repo.update_download(job_id, "success", cache_hit=hit)
             finally:
                 await release_lock(self.redis, lock_key, token)
+        except TelegramEntityTooLarge:
+            error = "Telegram отклонил файл: превышен допустимый размер."
+            await self.repo.update_download(job_id, "failed", error=error)
+            await self.notify_failure(job.user_id, error)
+        except (
+            RedisError, SQLAlchemyError, TelegramNetworkError,
+            TelegramServerError, TelegramRetryAfter,
+        ) as exc:
+            # Leave the message in the Redis pending list for XAUTOCLAIM.
+            # Do not permanently fail a user job due to short infrastructure outages.
+            attempt = await self.repo.record_download_retry(job_id)
+            if attempt <= MAX_TRANSIENT_RETRIES:
+                log.warning(
+                    "Transient download error job=%s attempt=%s/%s type=%s",
+                    job_id, attempt, MAX_TRANSIENT_RETRIES, type(exc).__name__,
+                )
+                raise
+            error = "Сервис временно недоступен после нескольких попыток. Повторите запрос позже."
+            await self.repo.update_download(job_id, "failed", error=error)
+            await self.notify_failure(job.user_id, error)
         except Exception as exc:
             log.exception("Download failed job=%s", job_id)
             error = str(exc) if isinstance(exc, MediaDownloadError) else (
                 "Не удалось отправить файл. Попробуйте позже."
             )
             await self.repo.update_download(job_id, "failed", error=error)
-            try:
-                await self.bot.send_message(job.user_id, f"❌ {error[:800]}")
-            except Exception:
-                log.warning("Cannot notify user %s about failed job", job.user_id)
+            await self.notify_failure(job.user_id, error)
 
     async def _await_other_download(
         self, chat_id: int, kind: str, key: str, lock_key: str,

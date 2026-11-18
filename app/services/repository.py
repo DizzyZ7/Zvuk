@@ -82,6 +82,19 @@ class Repository:
                 update(DownloadHistory).where(DownloadHistory.id == job_id).values(**values)
             )
 
+    async def record_download_retry(self, job_id: str) -> int:
+        async with self.factory.begin() as session:
+            result = await session.execute(
+                update(DownloadHistory)
+                .where(DownloadHistory.id == job_id)
+                .values(retry_count=DownloadHistory.retry_count + 1)
+                .returning(DownloadHistory.retry_count)
+            )
+            value = result.scalar_one_or_none()
+            if value is None:
+                raise LookupError("Download job missing while retrying")
+            return int(value)
+
     async def sponsors(self) -> list[SponsorChannel]:
         async with self.factory() as session:
             return list((await session.scalars(
