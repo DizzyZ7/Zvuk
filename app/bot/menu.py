@@ -10,6 +10,10 @@ from app.services.library import TrackLibrary
 from app.services.music_search import MusicSearch, MusicSearchError
 from app.services.playlists import PlaylistService
 from app.services.search_sessions import create_search
+from app.services.repository import Repository
+from app.core.config import Settings
+from app.bot.handlers import _search_download_states
+from app.bot.search_ui import render_search
 
 router = Router(name="menu")
 
@@ -32,6 +36,23 @@ async def show_menu(message: Message) -> None:
         "Твоя музыка — в одном месте.\n"
         "Найди трек, сохрани в плейлист или отправь аудио для распознавания.\n\n"
         "↓ Выбери раздел",
+        reply_markup=home_keyboard(),
+    )
+
+
+@router.message(Command("help"), F.chat.type == "private")
+async def show_help(message: Message) -> None:
+    await message.answer(
+        "🎧 ZVUK  /  ПОМОЩЬ\n\n"
+        "🔎 Напиши имя исполнителя — получишь список песен.\n"
+        "🎧 Нажимай номера тех треков, которые нужны.\n"
+        "✅ Уже полученные файлы повторно не отправляем.\n"
+        "⏳ До пяти разных треков могут ждать в очереди.\n"
+        "⭐ Добавляй в избранное, ➕ — в плейлист.\n\n"
+        "Плейлисты: /playlists\n"
+        "Поиск по фразе: /fragment слова песни\n"
+        "О распознавании: /menu\n"
+        "Условия: /terms и /privacy",
         reply_markup=home_keyboard(),
     )
 
@@ -92,6 +113,7 @@ async def handle_menu(
 @router.message(Command("fragment"), F.chat.type == "private")
 async def fragment_search(
     message: Message, redis: Redis, music_search: MusicSearch,
+    repo: Repository, settings: Settings,
 ) -> None:
     if not message.from_user:
         return
@@ -114,7 +136,9 @@ async def fragment_search(
         await status.edit_text("Совпадений не найдено. Попробуйте более длинную фразу.")
         return
     token = await create_search(redis, message.from_user.id, matches, query=f"Фраза: {query}")
+    states = await _search_download_states(repo, matches, message.from_user.id, settings)
     await status.edit_text(
-        "🔍 Возможные совпадения (точность не гарантируется):",
-        reply_markup=search_keyboard(token, matches),
+        render_search(matches, f"Фраза: {query}", states=states)
+        + "\n\n⚠️ Поиск по фразе приблизительный.",
+        reply_markup=search_keyboard(token, matches, states=states),
     )
