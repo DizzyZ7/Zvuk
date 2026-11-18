@@ -5,7 +5,7 @@ from redis.asyncio import Redis
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
-from app.models import AdPost, Broadcast, DownloadHistory, MediaCache, SponsorChannel, User
+from app.models import AdCampaign, AdPost, Broadcast, DownloadHistory, MediaCache, SponsorChannel, User
 from app.services.queue import BROADCAST_STREAM, DOWNLOAD_STREAM
 
 class Repository:
@@ -136,6 +136,63 @@ class Repository:
             )
             await session.execute(stmt)
         await self.redis.delete("active_ad")
+
+    async def add_campaign(
+        self, *, label: str, caption: str, target_url: str,
+        impressions_limit: int | None,
+    ) -> int:
+        async with self.factory.begin() as session:
+            campaign = AdCampaign(
+                label=label, caption=caption, target_url=target_url,
+                impressions_limit=impressions_limit, enabled=True,
+            )
+            session.add(campaign)
+            await session.flush()
+            return campaign.id
+
+    async def list_campaigns(self) -> list[AdCampaign]:
+        async with self.factory() as session:
+            return list((await session.scalars(
+                select(AdCampaign).order_by(AdCampaign.id.desc()).limit(100)
+            )).all())
+
+    async def set_campaign_enabled(self, campaign_id: int, *, enabled: bool) -> bool:
+        async with self.factory.begin() as session:
+            result = await session.execute(
+                update(AdCampaign).where(AdCampaign.id == campaign_id)
+                .values(enabled=enabled).returning(AdCampaign.id)
+            )
+            return result.scalar_one_or_none() is not None
+
+    async def select_campaign(self) -> AdCampaign | None:
+        async with self.factory() as session:
+            return await session.scalar(
+                select(AdCampaign)
+                .where(
+                    AdCampaign.enabled.is_(True),
+                    (AdCampaign.impressions_limit.is_(None) |
+                     (AdCampaign.impressions < AdCampaign.impressions_limit)),
+                )
+                .order_by(AdCampaign.impressions, AdCampaign.id)
+                .limit(1)
+            )
+
+    async def record_campaign_impression(self, campaign_id: int) -> bool:
+        # Recording happens only after send_audio / send_video returns successfully.
+        # This is best-effort accounting; an outage between send and commit may
+        # undercount. The conditional update limits acknowledged impressions.
+        async with self.factory.begin() as session:
+            result = await session.execute(
+                update(AdCampaign)
+                .where(
+                    AdCampaign.id == campaign_id,
+                    (AdCampaign.impressions_limit.is_(None) |
+                     (AdCampaign.impressions < AdCampaign.impressions_limit)),
+                )
+                .values(impressions=AdCampaign.impressions + 1)
+                .returning(AdCampaign.id)
+            )
+            return result.scalar_one_or_none() is not None
 
     async def queue_depths(self) -> tuple[int, int]:
         """Approximate active and queued events; ACKed events are deleted from streams."""

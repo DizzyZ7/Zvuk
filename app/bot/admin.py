@@ -153,6 +153,28 @@ async def remove_channel(callback: CallbackQuery, repo: Repository) -> None:
     await repo.sponsor_remove(channel_id)
     await list_channels(callback, repo)
 
+@router.callback_query(F.data == "adm:campaigns")
+async def show_campaigns_button(callback: CallbackQuery, repo: Repository) -> None:
+    rows = await repo.list_campaigns()
+    if isinstance(callback.message, Message):
+        if not rows:
+            await callback.message.answer(
+                "Кампаний нет. Создание: /campaign_add Название | Подпись | "
+                "https://example.com | 1000"
+            )
+        else:
+            lines = ["📈 Рекламные кампании:"]
+            for c in rows[:20]:
+                limit = "∞" if c.impressions_limit is None else str(c.impressions_limit)
+                lines.append(
+                    f"#{c.id} {'🟢' if c.enabled else '⚪'} {c.label[:35]} "
+                    f"{c.impressions}/{limit}"
+                )
+            lines.append("/campaigns — весь список и управление")
+            await callback.message.answer("\n".join(lines))
+    await callback.answer()
+
+
 @router.callback_query(F.data == "adm:ads")
 async def prompt_ad(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
     await state.set_state(AdminState.editing_ad)
