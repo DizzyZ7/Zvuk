@@ -16,18 +16,24 @@ router = Router(name="menu")
 
 def home_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔎 Найти музыку", callback_data="home:search"),
-         InlineKeyboardButton(text="🎧 Распознать", callback_data="home:recognize")],
-        [InlineKeyboardButton(text="📚 Избранное", callback_data="home:library"),
+        [InlineKeyboardButton(text="🔎 Поиск", callback_data="home:search"),
+         InlineKeyboardButton(text="🎙 Распознать", callback_data="home:recognize")],
+        [InlineKeyboardButton(text="⭐ Избранное", callback_data="home:library"),
          InlineKeyboardButton(text="🎼 Плейлисты", callback_data="home:playlists")],
         [InlineKeyboardButton(text="🌟 Premium", callback_data="home:premium"),
-         InlineKeyboardButton(text="❓ Помощь", callback_data="home:help")],
+         InlineKeyboardButton(text="❔ Помощь", callback_data="home:help")],
     ])
 
 
 @router.message(Command("menu"), F.chat.type == "private")
 async def show_menu(message: Message) -> None:
-    await message.answer("🎵 Zvuk — музыкальное меню", reply_markup=home_keyboard())
+    await message.answer(
+        "🎧 ZVUK  /  ГЛАВНАЯ\n\n"
+        "Твоя музыка — в одном месте.\n"
+        "Найди трек, сохрани в плейлист или отправь аудио для распознавания.\n\n"
+        "↓ Выбери раздел",
+        reply_markup=home_keyboard(),
+    )
 
 
 @router.callback_query(F.data.startswith("home:"))

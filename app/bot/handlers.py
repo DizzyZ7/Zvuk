@@ -226,10 +226,14 @@ async def _refresh_search(
     states = await _search_download_states(
         repo, session.results, callback.from_user.id, settings,
     )
-    await callback.message.edit_text(
-        render_search(session.results, session.query, page=page, states=states),
-        reply_markup=search_keyboard(token, session.results, page=page, states=states),
-    )
+    try:
+        await callback.message.edit_text(
+            render_search(session.results, session.query, page=page, states=states),
+            reply_markup=search_keyboard(token, session.results, page=page, states=states),
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            raise
 
 
 @router.callback_query(F.data.startswith("find:"))
