@@ -38,7 +38,8 @@ async def test_transient_redis_error_is_retried():
 async def test_retry_budget_exhaustion_notifies_user():
     worker, repo = make_worker(retry_count=4)
     await worker.process_download("job")
-    repo.update_download.assert_any_await("job", "failed", error=pytest.approx(
-        "Сервис временно недоступен после нескольких попыток. Повторите запрос позже."
-    ))
+    repo.update_download.assert_any_await(
+        "job", "failed",
+        error="Сервис временно недоступен после нескольких попыток. Повторите запрос позже.",
+    )
     worker.bot.send_message.assert_awaited_once()
