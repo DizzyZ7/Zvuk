@@ -17,7 +17,8 @@ class HealthStatus:
     worker: bool
 
     def display(self) -> str:
-        icon = lambda ok: "✅" if ok else "❌"
+        def icon(ok: bool) -> str:
+            return "✅" if ok else "❌"
         return (
             "🧪 Проверка Zvuk\n\n"
             f"{icon(self.telegram)} Telegram Bot API\n"
