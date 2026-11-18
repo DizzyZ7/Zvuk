@@ -30,7 +30,10 @@ class ThrottleMiddleware(BaseMiddleware):
         settings: Settings = data["settings"]
         if user and user.id not in settings.admin_ids:
             redis: Redis = data["redis"]
-            allowed = await redis.set(f"throttle:{user.id}", "1", ex=3, nx=True)
+            # Choosing a format should be immediate after sending a link.
+            # A separate callback limiter guards against repeated taps.
+            scope = "format" if isinstance(event, CallbackQuery) else "link"
+            allowed = await redis.set(f"throttle:{scope}:{user.id}", "1", ex=3, nx=True)
             if not allowed:
                 if isinstance(event, CallbackQuery):
                     await event.answer("Не чаще одного запроса в 3 секунды.", show_alert=False)

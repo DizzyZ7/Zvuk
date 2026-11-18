@@ -114,6 +114,12 @@ async def select_format(
     if choice["user"] != callback.from_user.id:
         await callback.answer("Эта кнопка предназначена другому пользователю.", show_alert=True)
         return
+    # Atomically consume this choice. Multiple taps must not enqueue the same
+    # download twice. Redis GETDEL is available in Redis 6.2+.
+    consumed = await redis.getdel(f"choice:{parts[1]}")
+    if consumed is None:
+        await callback.answer("Формат уже выбран. Отправьте ссылку заново.", show_alert=True)
+        return
     media = parse_media_url(choice["url"])
     await users.register(callback.from_user)
     await callback.answer()
