@@ -102,6 +102,8 @@ async def handle_link(
             json.dumps({
                 "user": message.from_user.id,
                 "urls": [result.url for result in results],
+                "titles": [result.title for result in results],
+                "artists": [result.artist for result in results],
             }),
             ex=900,
         )

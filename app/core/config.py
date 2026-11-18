@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     redis_url: str
     bot_api_url: str = "http://telegram-bot-api:8081"
     spotify_client_id: str = ""
+    audd_api_token: SecretStr = SecretStr("")
+    premium_price_stars: int = Field(default=149, ge=1, le=100000)
+    premium_days: int = Field(default=30, ge=1, le=365)
+    support_username: str = ""
     spotify_client_secret: SecretStr = SecretStr("")
     proxies: str = ""
     ytdlp_cookies: str = ""
