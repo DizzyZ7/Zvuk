@@ -41,31 +41,34 @@ class Worker:
         self.consumer = uuid4().hex[:12]
 
     async def send_cached(self, chat_id: int, kind: str, file_id: str) -> None:
-        caption = await self.ads.caption()
+        placement = await self.ads.placement(chat_id)
         if kind in AUDIO_KINDS:
-            await self.bot.send_audio(chat_id, audio=file_id, caption=caption)
+            await self.bot.send_audio(chat_id, audio=file_id, caption=placement.caption)
         else:
-            await self.bot.send_video(chat_id, video=file_id, caption=caption)
+            await self.bot.send_video(chat_id, video=file_id, caption=placement.caption)
+        await self.ads.delivered(placement)
 
     async def send_media(self, chat_id: int, kind: str, media) -> str:
-        caption = await self.ads.caption()
+        placement = await self.ads.placement(chat_id)
         file = FSInputFile(media.path)
         if kind in AUDIO_KINDS:
             sent = await self.bot.send_audio(
-                chat_id, audio=file, caption=caption,
+                chat_id, audio=file, caption=placement.caption,
                 title=media.title[:64],
                 performer=media.performer[:64] if media.performer else None,
                 duration=media.duration,
             )
             if not sent.audio:
                 raise MediaDownloadError("Telegram не вернул ID аудиофайла.")
+            await self.ads.delivered(placement)
             return sent.audio.file_id
         sent = await self.bot.send_video(
-            chat_id, video=file, caption=caption, supports_streaming=True,
+            chat_id, video=file, caption=placement.caption, supports_streaming=True,
             duration=media.duration,
         )
         if not sent.video:
             raise MediaDownloadError("Telegram не вернул ID видеофайла.")
+        await self.ads.delivered(placement)
         return sent.video.file_id
 
     async def notify_failure(self, user_id: int, error: str) -> None:

@@ -5,6 +5,8 @@ x-app: &app
   restart: unless-stopped
   volumes:
     - media_tmp:/shared
+    # Local Bot API returns filesystem paths in local mode.
+    - bot_api_data:/var/lib/telegram-bot-api:ro
     # Optional: provide cookies via a bind mount and set YTDLP_COOKIES
     # - ./secrets/cookies.txt:/run/secrets/cookies.txt:ro
   depends_on:

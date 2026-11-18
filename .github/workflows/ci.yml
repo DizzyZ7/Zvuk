@@ -7,6 +7,22 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: zvuk
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: zvuk_ci
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U zvuk -d zvuk_ci"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+asyncpg://zvuk:test_password@localhost:5432/zvuk_ci
+      RUN_DB_TESTS: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -15,6 +31,7 @@ jobs:
           cache: pip
       - run: cp .env.example .env && docker compose config -q
       - run: python -m pip install -e ".[dev]"
+      - run: alembic upgrade head
       - run: python -m compileall -q app tests alembic
       - run: ruff check app tests
       - run: pytest -q

@@ -1,6 +1,7 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from app.models import SponsorChannel
 from app.services.music_search import SearchResult
+from app.models import SavedTrack
 
 def format_keyboard(token: str, *, allow_video: bool = True) -> InlineKeyboardMarkup:
     standard = [
@@ -24,9 +25,26 @@ def search_keyboard(token: str, results: list[SearchResult]) -> InlineKeyboardMa
         label = f"{number}. {result.title}"
         if result.artist:
             label += f" — {result.artist}"
-        rows.append([InlineKeyboardButton(
-            text=label[:58], callback_data=f"find:{token}:{number - 1}",
-        )])
+        rows.append([
+            InlineKeyboardButton(
+                text=("🎧 " + label)[:56], callback_data=f"find:{token}:{number - 1}",
+            ),
+            InlineKeyboardButton(
+                text="💾", callback_data=f"stash:{token}:{number - 1}",
+            ),
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def library_keyboard(tracks: list[SavedTrack]) -> InlineKeyboardMarkup:
+    rows = []
+    for track in tracks:
+        rows.append([
+            InlineKeyboardButton(
+                text=("🎵 " + track.title)[:48], callback_data=f"libplay:{track.id}",
+            ),
+            InlineKeyboardButton(text="🗑", callback_data=f"libdel:{track.id}"),
+        ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
@@ -55,5 +73,6 @@ def admin_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🧪 Проверить систему", callback_data="adm:health")],
         [InlineKeyboardButton(text="📢 Спонсорские каналы", callback_data="adm:channels")],
         [InlineKeyboardButton(text="📝 Рекламная подпись", callback_data="adm:ads")],
+        [InlineKeyboardButton(text="📈 Рекламные кампании", callback_data="adm:campaigns")],
         [InlineKeyboardButton(text="📨 Рассылка", callback_data="adm:broadcast")],
     ])

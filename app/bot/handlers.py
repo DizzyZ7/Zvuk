@@ -30,6 +30,8 @@ async def start(message: Message, users: UserService) -> None:
         "Привет! Отправь ссылку на YouTube, VK, Rutube, TikTok, "
         "Яндекс.Музыку, Spotify, Instagram или Pinterest. "
         "Можешь также написать название песни или исполнителя. "
+        "Пришли голосовое, аудио, видео или кружок для распознавания музыки. "
+        "Аудиофрагмент для распознавания отправляется сервису AudD. "
         "Скачивай только контент, на использование которого у тебя есть права."
     )
 
@@ -41,11 +43,13 @@ async def dispatch_download(
     key = cache_key(media, kind, owner_id=owner_id)
     cached = await repo.cache_get(key)
     if cached:
+        placement = await ads.placement(user_id)
         try:
             if kind in AUDIO_KINDS:
-                await bot.send_audio(chat_id, audio=cached, caption=await ads.caption())
+                await bot.send_audio(chat_id, audio=cached, caption=placement.caption)
             else:
-                await bot.send_video(chat_id, video=cached, caption=await ads.caption())
+                await bot.send_video(chat_id, video=cached, caption=placement.caption)
+            await ads.delivered(placement)
             history_id = await repo.new_download(user_id, media.url, key, kind)
             await repo.update_download(history_id, "success", cache_hit=True)
             return
@@ -102,6 +106,8 @@ async def handle_link(
             json.dumps({
                 "user": message.from_user.id,
                 "urls": [result.url for result in results],
+                "titles": [result.title for result in results],
+                "artists": [result.artist for result in results],
             }),
             ex=900,
         )

@@ -15,13 +15,17 @@ async def test_cache_reuse_records_history_and_avoids_queue():
         new_download=AsyncMock(return_value="job01"),
         update_download=AsyncMock(),
     )
-    bot, redis, ads = AsyncMock(), AsyncMock(), SimpleNamespace(caption=AsyncMock(return_value="ad"))
+    bot, redis, ads = AsyncMock(), AsyncMock(), SimpleNamespace(
+        placement=AsyncMock(return_value=SimpleNamespace(caption="ad", campaign_id=2)),
+        delivered=AsyncMock(),
+    )
     await dispatch_download(
         bot, 42, 42, parse_media_url("https://youtu.be/dQw4w9WgXcQ"),
         "audio", repo, redis, ads, settings,
     )
     bot.send_audio.assert_awaited_once()
     repo.update_download.assert_awaited_once_with("job01", "success", cache_hit=True)
+    ads.delivered.assert_awaited_once()
     redis.xadd.assert_not_awaited()
 
 

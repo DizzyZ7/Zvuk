@@ -74,6 +74,7 @@ async def back(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == "adm:stats")
 async def show_stats(callback: CallbackQuery, repo: Repository) -> None:
     total, active, downloads, cached = await repo.stats()
+    premium_active, paid_count, gross_stars = await repo.premium_stats()
     try:
         queued_downloads, queued_broadcasts = await repo.queue_depths()
         queues = f"{queued_downloads} загрузок / {queued_broadcasts} рассылок"
@@ -83,7 +84,10 @@ async def show_stats(callback: CallbackQuery, repo: Repository) -> None:
         await callback.message.answer(
             f"📊 Пользователи: {total}\nЗа 24 часа: {active}\n"
             f"Успешных скачиваний: {downloads}\nОтдано из кэша: {cached}\n"
-            f"В очереди: {queues}"
+            f"В очереди: {queues}\n"
+            f"Premium активен: {premium_active}\n"
+            f"Платежей Stars: {paid_count}\n"
+            f"Получено: {gross_stars} Stars (не эквивалент дохода в ₽)"
         )
     await callback.answer()
 
@@ -152,6 +156,28 @@ async def remove_channel(callback: CallbackQuery, repo: Repository) -> None:
         return
     await repo.sponsor_remove(channel_id)
     await list_channels(callback, repo)
+
+@router.callback_query(F.data == "adm:campaigns")
+async def show_campaigns_button(callback: CallbackQuery, repo: Repository) -> None:
+    rows = await repo.list_campaigns()
+    if isinstance(callback.message, Message):
+        if not rows:
+            await callback.message.answer(
+                "Кампаний нет. Создание: /campaign_add Название | Подпись | "
+                "https://example.com | 1000"
+            )
+        else:
+            lines = ["📈 Рекламные кампании:"]
+            for c in rows[:20]:
+                limit = "∞" if c.impressions_limit is None else str(c.impressions_limit)
+                lines.append(
+                    f"#{c.id} {'🟢' if c.enabled else '⚪'} {c.label[:35]} "
+                    f"{c.impressions}/{limit}"
+                )
+            lines.append("/campaigns — весь список и управление")
+            await callback.message.answer("\n".join(lines))
+    await callback.answer()
+
 
 @router.callback_query(F.data == "adm:ads")
 async def prompt_ad(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
