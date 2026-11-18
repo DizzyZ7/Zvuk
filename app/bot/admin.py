@@ -1,0 +1,176 @@
+import asyncio
+import logging
+from urllib.parse import urlsplit
+
+from aiogram import Bot, F, Router
+from aiogram.enums import ChatMemberStatus
+from aiogram.exceptions import TelegramAPIError
+from aiogram.filters import Command, Filter
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from redis.asyncio import Redis
+
+from app.bot.keyboards import admin_keyboard
+from app.core.config import Settings
+from app.services.queue import enqueue_broadcast
+from app.services.repository import Repository
+
+log = logging.getLogger(__name__)
+router = Router(name="admin")
+
+class AdminOnly(Filter):
+    async def __call__(self, event: Message | CallbackQuery, settings: Settings) -> bool:
+        return event.from_user is not None and event.from_user.id in settings.admin_ids
+
+router.message.filter(AdminOnly())
+router.callback_query.filter(AdminOnly())
+
+class AdminState(StatesGroup):
+    adding_channel = State()
+    editing_ad = State()
+    broadcasting = State()
+
+@router.message(Command("admin"))
+async def admin_menu(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("⚙️ Управление Zvuk", reply_markup=admin_keyboard())
+
+@router.message(Command("cancel"))
+async def cancel(message: Message, state: FSMContext) -> None:
+    await state.clear()
+    await message.answer("Отменено.", reply_markup=admin_keyboard())
+
+@router.callback_query(F.data == "adm:home")
+async def back(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.clear()
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text("⚙️ Управление Zvuk", reply_markup=admin_keyboard())
+    await callback.answer()
+
+@router.callback_query(F.data == "adm:stats")
+async def show_stats(callback: CallbackQuery, repo: Repository) -> None:
+    total, active, downloads, cached = await repo.stats()
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            f"📊 Пользователи: {total}\nЗа 24 часа: {active}\n"
+            f"Успешных скачиваний: {downloads}\nОтдано из кэша: {cached}"
+        )
+    await callback.answer()
+
+@router.callback_query(F.data == "adm:channels")
+async def list_channels(callback: CallbackQuery, repo: Repository) -> None:
+    channels = await repo.sponsors()
+    rows = [[InlineKeyboardButton(text=f"❌ Удалить {c.title[:30]}",
+                                  callback_data=f"adm:del:{c.id}")] for c in channels]
+    rows.append([InlineKeyboardButton(text="➕ Добавить", callback_data="adm:add")])
+    rows.append([InlineKeyboardButton(text="↩️ Меню", callback_data="adm:home")])
+    if isinstance(callback.message, Message):
+        await callback.message.edit_text(
+            "Спонсорские каналы (бот должен быть администратором):",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+    await callback.answer()
+
+@router.callback_query(F.data == "adm:add")
+async def add_channel_prompt(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminState.adding_channel)
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            "Отправьте @username канала или строку: -1001234567890 | https://t.me/+invite\n"
+            "Для публичного канала ссылка сформируется автоматически. /cancel — отмена."
+        )
+    await callback.answer()
+
+@router.message(AdminState.adding_channel)
+async def add_channel(message: Message, bot: Bot, repo: Repository, state: FSMContext) -> None:
+    value = (message.text or "").strip()
+    parts = [p.strip() for p in value.split("|", 1)]
+    chat_ref = parts[0]
+    if not chat_ref.startswith("@") and not chat_ref.startswith("-100"):
+        await message.answer("Укажите @username либо числовой -100... ID канала.")
+        return
+    try:
+        chat = await bot.get_chat(int(chat_ref) if chat_ref.startswith("-100") else chat_ref)
+        me = await bot.get_me()
+        membership = await bot.get_chat_member(chat.id, me.id)
+        if chat.type != "channel" or membership.status not in (
+            ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.CREATOR
+        ):
+            await message.answer("Бот должен быть администратором канала.")
+            return
+        url = parts[1] if len(parts) > 1 else (
+            f"https://t.me/{chat.username}" if chat.username else ""
+        )
+        parsed = urlsplit(url)
+        if parsed.scheme != "https" or parsed.hostname != "t.me" or not parsed.path.strip("/"):
+            await message.answer("Укажите действительную ссылку приглашения https://t.me/...")
+            return
+        await repo.sponsor_add(chat.id, chat.title or str(chat.id), url)
+    except (ValueError, TelegramAPIError) as exc:
+        log.warning("Sponsor configuration failed: %s", exc)
+        await message.answer("Не удалось найти канал или проверить права бота.")
+        return
+    await state.clear()
+    await message.answer("✅ Канал сохранен.", reply_markup=admin_keyboard())
+
+@router.callback_query(F.data.startswith("adm:del:"))
+async def remove_channel(callback: CallbackQuery, repo: Repository) -> None:
+    try:
+        channel_id = int((callback.data or "").split(":")[2])
+    except (ValueError, IndexError):
+        await callback.answer("Некорректный ID.", show_alert=True)
+        return
+    await repo.sponsor_remove(channel_id)
+    await callback.answer("Канал удален.")
+    await list_channels(callback, repo)
+
+@router.callback_query(F.data == "adm:ads")
+async def prompt_ad(callback: CallbackQuery, state: FSMContext, repo: Repository) -> None:
+    await state.set_state(AdminState.editing_ad)
+    current = await repo.ad_text()
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            "Введите новую рекламную подпись (до 1024 символов). "
+            "Отправьте '-' для отключения.\n\nТекущая:\n" + (current or "(отключена)")
+        )
+    await callback.answer()
+
+@router.message(AdminState.editing_ad)
+async def save_ad(message: Message, state: FSMContext, repo: Repository) -> None:
+    text = (message.text or "").strip()
+    if text == "-":
+        text = ""
+    if len(text) > 1024:
+        await message.answer("Максимальная длина подписи — 1024 символа.")
+        return
+    await repo.set_ad(text)
+    await state.clear()
+    await message.answer("✅ Подпись обновлена без перезапуска.", reply_markup=admin_keyboard())
+
+@router.callback_query(F.data == "adm:broadcast")
+async def prompt_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
+    await state.set_state(AdminState.broadcasting)
+    if isinstance(callback.message, Message):
+        await callback.message.answer(
+            "Отправьте сообщение для рассылки (текст/фото/видео). "
+            "Оно будет скопировано получателям. /cancel — отмена."
+        )
+    await callback.answer()
+
+@router.message(AdminState.broadcasting)
+async def launch_broadcast(
+    message: Message, state: FSMContext, repo: Repository, redis: Redis,
+) -> None:
+    if not message.from_user:
+        return
+    progress = await message.answer("📨 Рассылка поставлена в очередь: 0%")
+    job_id = await repo.new_broadcast(message.from_user.id, message.message_id, progress.message_id)
+    try:
+        await enqueue_broadcast(redis, job_id)
+    except Exception:
+        await repo.broadcast_progress(job_id, 0, 0, 0, "failed")
+        await progress.edit_text("Не удалось поставить рассылку в очередь.")
+        raise
+    await state.clear()
+    await message.answer("Меню:", reply_markup=admin_keyboard())
