@@ -12,6 +12,7 @@ from app.bot.keyboards import format_keyboard, search_keyboard, subscribe_keyboa
 from app.bot.middlewares import subscription_missing
 from app.core.config import Settings
 from app.services.ad_manager import AdManager
+from app.services.media_downloader import AUDIO_KINDS
 from app.services.music_search import MusicSearch, MusicSearchError
 from app.services.queue import enqueue_download
 from app.services.repository import Repository
@@ -41,7 +42,7 @@ async def dispatch_download(
     cached = await repo.cache_get(key)
     if cached:
         try:
-            if kind == "audio":
+            if kind in AUDIO_KINDS:
                 await bot.send_audio(chat_id, audio=cached, caption=await ads.caption())
             else:
                 await bot.send_video(chat_id, video=cached, caption=await ads.caption())
@@ -110,16 +111,15 @@ async def handle_link(
         )
         return
     await users.register(message.from_user)
-    if media.default_kind:
-        await dispatch_download(bot, message.chat.id, message.from_user.id,
-                                media, media.default_kind, repo, redis, ads, settings)
-        return
     token = uuid4().hex[:16]
     await redis.set(
         f"choice:{token}", json.dumps({"user": message.from_user.id, "url": media.url}),
         ex=3600,
     )
-    await message.answer("В каком формате скачать?", reply_markup=format_keyboard(token))
+    await message.answer(
+        "Выберите формат или скорость:",
+        reply_markup=format_keyboard(token, allow_video=media.default_kind is None),
+    )
 
 @router.callback_query(F.data.startswith("fmt:"))
 async def select_format(
@@ -130,7 +130,7 @@ async def select_format(
         await callback.answer("Сообщение недоступно.", show_alert=True)
         return
     parts = (callback.data or "").split(":")
-    if len(parts) != 3 or parts[2] not in {"audio", "video"}:
+    if len(parts) != 3 or parts[2] not in {"audio", "video", "fast", "slow"}:
         await callback.answer("Неизвестный формат.", show_alert=True)
         return
     data = await redis.get(f"choice:{parts[1]}")
@@ -148,6 +148,9 @@ async def select_format(
         await callback.answer("Формат уже выбран. Отправьте ссылку заново.", show_alert=True)
         return
     media = parse_media_url(choice["url"])
+    if media.default_kind and parts[2] == "video":
+        await callback.answer("Для музыкальных ссылок доступно только аудио.", show_alert=True)
+        return
     await users.register(callback.from_user)
     await callback.answer()
     await dispatch_download(bot, callback.message.chat.id, callback.from_user.id,

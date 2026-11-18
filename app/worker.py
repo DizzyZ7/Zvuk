@@ -20,7 +20,7 @@ from app.core.redis import make_redis
 from app.core.telegram import make_bot
 from app.services.ad_manager import AdManager
 from app.services.housekeeping import prune_orphaned_workdirs
-from app.services.media_downloader import MediaDownloadError, MediaDownloader
+from app.services.media_downloader import AUDIO_KINDS, MediaDownloadError, MediaDownloader
 from app.services.queue import (
     BROADCAST_STREAM, DOWNLOAD_STREAM, GROUP, STALE_AFTER_MS, acknowledge,
     ensure_groups, keep_pending_alive, release_lock,
@@ -42,7 +42,7 @@ class Worker:
 
     async def send_cached(self, chat_id: int, kind: str, file_id: str) -> None:
         caption = await self.ads.caption()
-        if kind == "audio":
+        if kind in AUDIO_KINDS:
             await self.bot.send_audio(chat_id, audio=file_id, caption=caption)
         else:
             await self.bot.send_video(chat_id, video=file_id, caption=caption)
@@ -50,7 +50,7 @@ class Worker:
     async def send_media(self, chat_id: int, kind: str, media) -> str:
         caption = await self.ads.caption()
         file = FSInputFile(media.path)
-        if kind == "audio":
+        if kind in AUDIO_KINDS:
             sent = await self.bot.send_audio(
                 chat_id, audio=file, caption=caption,
                 title=media.title[:64],

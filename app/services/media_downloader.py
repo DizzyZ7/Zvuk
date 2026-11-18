@@ -12,6 +12,8 @@ from app.services.spotify_resolver import SpotifyResolver, SpotifyResolutionErro
 from app.services.urls import MediaURL
 
 log = logging.getLogger(__name__)
+AUDIO_KINDS = frozenset({"audio", "fast", "slow"})
+TEMPO_FACTORS = {"fast": 1.25, "slow": 0.80}
 
 class MediaDownloadError(Exception):
     pass
@@ -31,7 +33,7 @@ class MediaDownloader:
         self._proxies = itertools.cycle(settings.proxy_list) if settings.proxy_list else None
 
     async def download(self, media: MediaURL, kind: str, folder: Path, *, use_auth_cookies: bool = False) -> DownloadedMedia:
-        if kind not in ("audio", "video"):
+        if kind not in AUDIO_KINDS | {"video"}:
             raise MediaDownloadError("Неизвестный формат.")
         if media.platform in ("spotify", "deezer", "yandex") and kind == "video":
             raise MediaDownloadError("Для музыкальных сервисов доступно только аудио.")
@@ -48,7 +50,7 @@ class MediaDownloader:
                 raise MediaDownloadError(str(exc)) from exc
         proxy = next(self._proxies) if self._proxies is not None else None
         opts: dict[str, Any] = {
-            "format": "bestaudio/best" if kind == "audio" else (
+            "format": "bestaudio/best" if kind in AUDIO_KINDS else (
                 "bv*[ext=mp4]+ba[ext=m4a]/b[ext=mp4]/best[ext=mp4]/best"
             ),
             "outtmpl": str(folder / "%(id)s.%(ext)s"),
@@ -72,7 +74,7 @@ class MediaDownloader:
             if not cookies.is_file():
                 raise MediaDownloadError("Файл cookies не найден на сервере.")
             opts["cookiefile"] = str(cookies)
-        if kind == "audio":
+        if kind in AUDIO_KINDS:
             opts["postprocessors"] = [{
                 "key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"
             }]
@@ -95,7 +97,7 @@ class MediaDownloader:
             raise MediaDownloadError("Ошибка обработки медиа. Попробуйте другую ссылку.") from exc
         candidates = sorted(
             (p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in
-             ((".mp3",) if kind == "audio" else (".mp4", ".mkv", ".webm", ".mov"))),
+             ((".mp3",) if kind in AUDIO_KINDS else (".mp4", ".mkv", ".webm", ".mov"))),
             key=lambda p: p.stat().st_mtime, reverse=True,
         )
         if not candidates:
@@ -103,12 +105,16 @@ class MediaDownloader:
         path = candidates[0]
         if kind == "video" and path.suffix.lower() != ".mp4":
             path = await self._to_mp4(path)
+        if kind in TEMPO_FACTORS:
+            path = await self._shift_tempo(path, TEMPO_FACTORS[kind], kind)
         if path.stat().st_size > self.settings.max_file_mb * 1_000_000:
             raise MediaDownloadError("Файл превышает лимит Telegram (2000 МБ).")
         if isinstance(info, dict) and "entries" in info:
             info = next((e for e in info["entries"] if e), {})
         info = info if isinstance(info, dict) else {}
         duration = info.get("duration")
+        if isinstance(duration, (int, float)) and duration > 0 and kind in TEMPO_FACTORS:
+            duration = round(duration / TEMPO_FACTORS[kind])
         return DownloadedMedia(
             path=path,
             title=str(info.get("track") or info.get("title") or "Аудио")[:255],
@@ -146,6 +152,29 @@ class MediaDownloader:
         if "unsupported url" in lower:
             return "Сервис или тип ссылки пока не поддерживается."
         return "Не удалось скачать файл: контент удален, недоступен или временно ограничен."
+
+    @staticmethod
+    async def _shift_tempo(source: Path, factor: float, label: str) -> Path:
+        if source.suffix.lower() != ".mp3" or not 0.5 <= factor <= 2:
+            raise MediaDownloadError("Некорректный исходный MP3 или темп.")
+        dest = source.with_name(f"{source.stem}_{label}.mp3")
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(source), "-vn", "-filter:a", f"atempo={factor:.2f}",
+            "-codec:a", "libmp3lame", "-b:a", "192k", str(dest),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, error = await asyncio.wait_for(process.communicate(), timeout=1200)
+        except asyncio.TimeoutError as exc:
+            process.kill()
+            await process.communicate()
+            raise MediaDownloadError("Превышено время обработки аудио.") from exc
+        if process.returncode != 0 or not dest.is_file() or dest.stat().st_size == 0:
+            log.warning("Audio tempo ffmpeg error: %s", error.decode(errors="replace")[-500:])
+            raise MediaDownloadError("Не удалось изменить скорость аудио.")
+        source.unlink(missing_ok=True)
+        return dest
 
     @staticmethod
     async def _to_mp4(source: Path) -> Path:
