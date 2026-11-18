@@ -3,7 +3,7 @@ import logging
 
 from aiogram import Dispatcher
 from aiogram.fsm.storage.redis import RedisStorage
-from app.bot import admin, campaigns, handlers, library, premium, recognition
+from app.bot import admin, campaigns, handlers, legal, library, premium, recognition
 from app.bot.middlewares import SponsorMiddleware, ThrottleMiddleware
 from app.core.config import settings
 from app.core.database import engine, session_factory
@@ -27,6 +27,7 @@ async def main() -> None:
     dp.include_router(admin.router)
     dp.include_router(campaigns.router)
     dp.include_router(premium.router)
+    dp.include_router(legal.router)
     dp.include_router(library.router)
     dp.include_router(recognition.router)
     dp.include_router(handlers.router)
