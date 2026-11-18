@@ -42,6 +42,7 @@ def broadcast_stop_keyboard(job_id: str) -> InlineKeyboardMarkup:
 def admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📊 Статистика", callback_data="adm:stats")],
+        [InlineKeyboardButton(text="🧪 Проверить систему", callback_data="adm:health")],
         [InlineKeyboardButton(text="📢 Спонсорские каналы", callback_data="adm:channels")],
         [InlineKeyboardButton(text="📝 Рекламная подпись", callback_data="adm:ads")],
         [InlineKeyboardButton(text="📨 Рассылка", callback_data="adm:broadcast")],
