@@ -7,7 +7,7 @@ import shutil
 import socket
 import sys
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 from urllib.request import Request, urlopen
 
 
@@ -56,6 +56,13 @@ def environment_issues(env: dict[str, str]) -> list[str]:
             problems.append("Некорректный TELEGRAM_API_ID")
     except ValueError:
         problems.append("Некорректный TELEGRAM_API_ID")
+    database = env.get("DATABASE_URL", "")
+    db_password = urlsplit(database).password if database else None
+    expected_password = env.get("POSTGRES_PASSWORD")
+    if not database or not urlsplit(database).hostname:
+        problems.append("Не заполнен DATABASE_URL")
+    elif expected_password and unquote(db_password or "") != expected_password:
+        problems.append("Пароль DATABASE_URL не совпадает с POSTGRES_PASSWORD")
     if env.get("PREMIUM_ENABLED", "false").lower() in {"true", "1", "yes"}:
         problems.append("Premium включен: для первых тестов используйте PREMIUM_ENABLED=false")
     return problems
@@ -75,9 +82,12 @@ def main() -> int:
         ("Redis", os.getenv("REDIS_URL", ""), 6379),
         ("Local Bot API", os.getenv("BOT_API_URL", ""), 8081),
     ]
+    failed_connections = []
     for label, url, port in services:
         result = tcp_reachable(url, fallback_port=port)
         print(f"[{'OK' if result else 'FAIL'}] TCP {label}")
+        if not result:
+            failed_connections.append(label)
 
     for label, url in (
         ("Telegram cloud HTTPS", "https://api.telegram.org"),
@@ -96,7 +106,10 @@ def main() -> int:
         "При разных IP нельзя считать, что весь трафик Docker идет через VPN. "
         "Перезапустите Docker Desktop после подключения VPN и повторите проверку."
     )
-    return 1 if problems else 0
+    if failed_connections:
+        print("⛔ Нет соединения с обязательными сервисами: " +
+              ", ".join(failed_connections))
+    return 1 if problems or failed_connections else 0
 
 
 if __name__ == "__main__":
