@@ -6,6 +6,7 @@ from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
 from app.models import AdPost, Broadcast, DownloadHistory, MediaCache, SponsorChannel, User
+from app.services.queue import BROADCAST_STREAM, DOWNLOAD_STREAM
 
 class Repository:
     def __init__(self, factory: async_sessionmaker[AsyncSession], redis: Redis):
@@ -135,6 +136,12 @@ class Repository:
             )
             await session.execute(stmt)
         await self.redis.delete("active_ad")
+
+    async def queue_depths(self) -> tuple[int, int]:
+        """Approximate active and queued events; ACKed events are deleted from streams."""
+        downloads = await self.redis.xlen(DOWNLOAD_STREAM)
+        broadcasts = await self.redis.xlen(BROADCAST_STREAM)
+        return int(downloads), int(broadcasts)
 
     async def stats(self) -> tuple[int, int, int, int]:
         since = datetime.now(timezone.utc) - timedelta(hours=24)

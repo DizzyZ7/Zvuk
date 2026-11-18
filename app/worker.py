@@ -19,6 +19,7 @@ from app.core.database import engine, session_factory
 from app.core.redis import make_redis
 from app.core.telegram import make_bot
 from app.services.ad_manager import AdManager
+from app.services.housekeeping import prune_orphaned_workdirs
 from app.services.media_downloader import MediaDownloadError, MediaDownloader
 from app.services.queue import (
     BROADCAST_STREAM, DOWNLOAD_STREAM, GROUP, STALE_AFTER_MS, acknowledge,
@@ -285,9 +286,19 @@ class Worker:
                 log.exception("Queue consumer error")
                 await asyncio.sleep(3)
 
+    async def heartbeat(self) -> None:
+        key = f"zvuk:worker:alive:{self.consumer}"
+        while True:
+            try:
+                await self.redis.set(key, "1", ex=40)
+            except RedisError:
+                log.warning("Unable to publish worker heartbeat")
+            await asyncio.sleep(15)
+
     async def run(self) -> None:
         await ensure_groups(self.redis)
         async with asyncio.TaskGroup() as group:
+            group.create_task(self.heartbeat())
             for index in range(settings.worker_concurrency):
                 group.create_task(self.consume(DOWNLOAD_STREAM, index))
             group.create_task(self.consume(BROADCAST_STREAM, 99))
@@ -299,6 +310,9 @@ async def main() -> None:
     bot = make_bot()
     try:
         await redis.ping()
+        removed = await asyncio.to_thread(prune_orphaned_workdirs, Path("/shared"))
+        if removed:
+            log.info("Cleaned %s stale media work directories", removed)
         worker = Worker(bot, redis, Repository(session_factory, redis))
         await worker.run()
     finally:

@@ -9,6 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 from app.bot.keyboards import admin_keyboard, broadcast_confirmation, broadcast_stop_keyboard
 from app.core.config import Settings
@@ -54,10 +55,16 @@ async def back(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == "adm:stats")
 async def show_stats(callback: CallbackQuery, repo: Repository) -> None:
     total, active, downloads, cached = await repo.stats()
+    try:
+        queued_downloads, queued_broadcasts = await repo.queue_depths()
+        queues = f"{queued_downloads} загрузок / {queued_broadcasts} рассылок"
+    except RedisError:
+        queues = "данные временно недоступны"
     if isinstance(callback.message, Message):
         await callback.message.answer(
             f"📊 Пользователи: {total}\nЗа 24 часа: {active}\n"
-            f"Успешных скачиваний: {downloads}\nОтдано из кэша: {cached}"
+            f"Успешных скачиваний: {downloads}\nОтдано из кэша: {cached}\n"
+            f"В очереди: {queues}"
         )
     await callback.answer()
 
