@@ -8,6 +8,7 @@ from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError, TelegramRetryAfter
 from aiogram.types import FSInputFile
 from redis.asyncio import Redis
+from app.bot.keyboards import broadcast_stop_keyboard
 from app.core.config import settings
 from app.core.database import engine, session_factory
 from app.core.redis import make_redis
@@ -143,7 +144,7 @@ class Worker:
 
     @staticmethod
     def progress_text(processed: int, total: int, failed: int, done: bool) -> str:
-        ratio = (processed / total) if total else 1
+        ratio = 1.0 if done or not total else min(1.0, processed / total)
         filled = min(10, int(ratio * 10))
         return (
             ("✅ Рассылка завершена" if done else "📨 Рассылка") +
@@ -153,14 +154,19 @@ class Worker:
 
     async def process_broadcast(self, job_id: str) -> None:
         job = await self.repo.get_broadcast(job_id)
-        if job is None or job.status == "complete":
+        if job is None or job.status in {"complete", "cancelled", "failed"}:
             return
         processed, failed, after = job.processed, job.failed, job.last_user_id
         while True:
-            recipients = await self.repo.users_after(after)
+            recipients = await self.repo.users_after(after, created_before=job.created_at)
             if not recipients:
                 break
             for user_id in recipients:
+                # Stop promptly when an administrator presses "Stop".
+                if processed % 5 == 0:
+                    current = await self.repo.get_broadcast(job_id)
+                    if current is None or current.status == "cancelled":
+                        return
                 try:
                     await self.bot.copy_message(
                         chat_id=user_id, from_chat_id=job.source_chat_id,
@@ -188,17 +194,23 @@ class Worker:
                     failed += 1
                 processed += 1
                 after = user_id
+                # Persist after each recipient: recovery replays at most the last
+                # uncommitted send, rather than batches of 25 messages.
+                await self.repo.broadcast_progress(job_id, processed, failed, after, "running")
                 if processed % 25 == 0:
-                    await self.repo.broadcast_progress(job_id, processed, failed, after, "running")
                     try:
                         await self.bot.edit_message_text(
                             self.progress_text(processed, job.total, failed, False),
                             chat_id=job.admin_id, message_id=job.progress_message_id,
+                            reply_markup=broadcast_stop_keyboard(job_id),
                         )
                     except TelegramBadRequest:
                         pass
                 await asyncio.sleep(0.065)
         await self.repo.broadcast_progress(job_id, processed, failed, after, "complete")
+        final = await self.repo.get_broadcast(job_id)
+        if final is None or final.status == "cancelled":
+            return
         try:
             await self.bot.edit_message_text(
                 self.progress_text(processed, job.total, failed, True),
