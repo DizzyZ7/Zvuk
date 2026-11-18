@@ -51,7 +51,7 @@ async def test_stars_checkout_payment_and_idempotent_grant():
         await service.complete(payload, user_id, "XTR", 149, "different_charge_" + uuid4().hex)
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_library_isolated_by_owner_and_deduplicated():
     ids = [10_000_000_002, 10_000_000_003]
     async with session_factory.begin() as session:
@@ -69,7 +69,7 @@ async def test_library_isolated_by_owner_and_deduplicated():
     assert await lib.count(ids[0]) == 0
 
 
-@pytest.mark.asyncio
+@pytest.mark.asyncio(loop_scope="module")
 async def test_campaign_limit_and_deliveries():
     repo = Repository(session_factory, redis=None)  # No Redis calls in campaign methods.
     cid = await repo.add_campaign(
