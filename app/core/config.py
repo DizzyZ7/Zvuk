@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     recognition_monthly_cap: int = Field(default=300, ge=1, le=1000000)
     free_recognitions_daily: int = Field(default=3, ge=0, le=100)
     premium_recognitions_daily: int = Field(default=20, ge=1, le=1000)
+    premium_enabled: bool = False
     premium_price_stars: int = Field(default=149, ge=1, le=100000)
     premium_days: int = Field(default=30, ge=1, le=365)
     support_username: str = ""

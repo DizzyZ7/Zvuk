@@ -1,5 +1,8 @@
 """User-facing Telegram Stars Premium purchase and payment confirmation."""
+import asyncio
 import logging
+
+from sqlalchemy.exc import SQLAlchemyError
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
@@ -19,6 +22,14 @@ async def premium_offer(
     premium: PremiumService, users: UserService,
 ) -> None:
     if not message.from_user:
+        return
+    if not settings.premium_enabled:
+        await message.answer(
+            "🌟 Premium пока готовится к запуску. Бесплатные функции работают."
+        )
+        return
+    if not settings.support_username.strip():
+        await message.answer("Оплата временно недоступна. Контакт поддержки не настроен.")
         return
     await users.register(message.from_user)
     expires = await premium.active_until(message.from_user.id)
@@ -46,11 +57,15 @@ async def premium_offer(
 
 
 @router.pre_checkout_query()
-async def premium_checkout(query: PreCheckoutQuery, premium: PremiumService) -> None:
-    valid = await premium.validate_checkout(
-        query.invoice_payload, query.from_user.id,
-        query.currency, query.total_amount,
-    )
+async def premium_checkout(
+    query: PreCheckoutQuery, premium: PremiumService, settings: Settings,
+) -> None:
+    valid = bool(settings.premium_enabled and settings.support_username.strip())
+    if valid:
+        valid = await premium.validate_checkout(
+            query.invoice_payload, query.from_user.id,
+            query.currency, query.total_amount,
+        )
     await query.answer(
         ok=valid,
         error_message=None if valid else "Счет устарел или сумма не совпадает. Откройте /premium заново.",
@@ -64,29 +79,37 @@ async def premium_success(
     if not message.from_user or not message.successful_payment:
         return
     payment = message.successful_payment
-    try:
-        expiry, first = await premium.complete(
-            payment.invoice_payload, message.from_user.id,
-            payment.currency, payment.total_amount,
-            payment.telegram_payment_charge_id,
-        )
-    except InvalidPayment:
-        log.exception("Invalid paid invoice for user=%s", message.from_user.id)
-        await message.answer(
-            "Платеж получен, но автоматическое начисление недоступно. "
-            "Напишите /paysupport — платеж будет проверен."
-        )
-        return
-    if first:
-        await message.answer(
-            f"✅ Zvuk Premium активен до {expiry:%d.%m.%Y %H:%M} UTC. "
-            "Рекламные подписи больше не показываются."
-        )
+    for attempt in range(3):
+        try:
+            expiry, _ = await premium.complete(
+                payment.invoice_payload, message.from_user.id,
+                payment.currency, payment.total_amount,
+                payment.telegram_payment_charge_id,
+            )
+            await message.answer(
+                f"✅ Zvuk Premium активен до {expiry:%d.%m.%Y %H:%M} UTC. "
+                "Рекламные подписи больше не показываются."
+            )
+            return
+        except InvalidPayment:
+            log.exception("Invalid paid invoice for user=%s", message.from_user.id)
+            break
+        except SQLAlchemyError:
+            log.exception(
+                "Payment database unavailable user=%s attempt=%s",
+                message.from_user.id, attempt + 1,
+            )
+            if attempt < 2:
+                await asyncio.sleep(attempt + 1)
+    await message.answer(
+        "Telegram подтвердил платеж, но автоматическое начисление недоступно. "
+        "Напишите /paysupport и сохраните квитанцию для проверки."
+    )
 
 
 @router.message(Command("paysupport"), F.chat.type == "private")
 async def payment_support(message: Message, settings: Settings) -> None:
-    support = f"@{settings.support_username}" if settings.support_username else (
+    support = f"@{settings.support_username.lstrip(chr(64))}" if settings.support_username else (
         "Напишите администратору бота через доступный контакт."
     )
     await message.answer(

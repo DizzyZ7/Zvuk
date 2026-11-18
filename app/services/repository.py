@@ -5,7 +5,8 @@ from redis.asyncio import Redis
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
-from app.models import AdCampaign, AdPost, Broadcast, DownloadHistory, MediaCache, SponsorChannel, User
+from app.models import (AdCampaign, AdPost, Broadcast, DownloadHistory, MediaCache,
+                        PremiumGrant, PremiumPayment, SponsorChannel, User)
 from app.services.queue import BROADCAST_STREAM, DOWNLOAD_STREAM
 
 class Repository:
@@ -199,6 +200,24 @@ class Repository:
         downloads = await self.redis.xlen(DOWNLOAD_STREAM)
         broadcasts = await self.redis.xlen(BROADCAST_STREAM)
         return int(downloads), int(broadcasts)
+
+    async def premium_stats(self) -> tuple[int, int, int]:
+        """Active subscriptions, completed payments and gross Stars (not fiat revenue)."""
+        now = datetime.now(timezone.utc)
+        async with self.factory() as session:
+            active = await session.scalar(
+                select(func.count()).select_from(PremiumGrant)
+                .where(PremiumGrant.valid_until > now)
+            )
+            payments = await session.scalar(
+                select(func.count()).select_from(PremiumPayment)
+                .where(PremiumPayment.refunded.is_(False))
+            )
+            stars = await session.scalar(
+                select(func.sum(PremiumPayment.stars))
+                .where(PremiumPayment.refunded.is_(False))
+            )
+        return int(active or 0), int(payments or 0), int(stars or 0)
 
     async def stats(self) -> tuple[int, int, int, int]:
         since = datetime.now(timezone.utc) - timedelta(hours=24)

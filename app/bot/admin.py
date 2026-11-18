@@ -74,6 +74,7 @@ async def back(callback: CallbackQuery, state: FSMContext) -> None:
 @router.callback_query(F.data == "adm:stats")
 async def show_stats(callback: CallbackQuery, repo: Repository) -> None:
     total, active, downloads, cached = await repo.stats()
+    premium_active, paid_count, gross_stars = await repo.premium_stats()
     try:
         queued_downloads, queued_broadcasts = await repo.queue_depths()
         queues = f"{queued_downloads} загрузок / {queued_broadcasts} рассылок"
@@ -83,7 +84,10 @@ async def show_stats(callback: CallbackQuery, repo: Repository) -> None:
         await callback.message.answer(
             f"📊 Пользователи: {total}\nЗа 24 часа: {active}\n"
             f"Успешных скачиваний: {downloads}\nОтдано из кэша: {cached}\n"
-            f"В очереди: {queues}"
+            f"В очереди: {queues}\n"
+            f"Premium активен: {premium_active}\n"
+            f"Платежей Stars: {paid_count}\n"
+            f"Получено: {gross_stars} Stars (не эквивалент дохода в ₽)"
         )
     await callback.answer()
 

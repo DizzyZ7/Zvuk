@@ -37,11 +37,13 @@ class PremiumService:
     ) -> bool:
         if currency != "XTR" or not payload.startswith("premium:"):
             return False
+        now = datetime.now(timezone.utc)
         async with self.factory() as session:
             order = await session.get(PremiumOrder, payload)
             return bool(
                 order and order.user_id == user_id and order.stars == amount
                 and order.paid_at is None
+                and order.created_at >= now - timedelta(minutes=30)
             )
 
     async def complete(
