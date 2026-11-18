@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     bot_api_url: str = "http://telegram-bot-api:8081"
     spotify_client_id: str = ""
     audd_api_token: SecretStr = SecretStr("")
+    recognition_max_input_mb: int = Field(default=20, ge=1, le=100)
+    free_recognitions_daily: int = Field(default=3, ge=0, le=100)
+    premium_recognitions_daily: int = Field(default=20, ge=1, le=1000)
     premium_price_stars: int = Field(default=149, ge=1, le=100000)
     premium_days: int = Field(default=30, ge=1, le=365)
     support_username: str = ""
