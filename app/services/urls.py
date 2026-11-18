@@ -14,6 +14,9 @@ HOSTS = {
     "tiktok.com": "tiktok", "www.tiktok.com": "tiktok",
     "vm.tiktok.com": "tiktok", "vt.tiktok.com": "tiktok",
     "open.spotify.com": "spotify",
+    "instagram.com": "instagram", "www.instagram.com": "instagram",
+    "pinterest.com": "pinterest", "www.pinterest.com": "pinterest",
+    "pin.it": "pinterest",
 }
 
 class InvalidMediaURL(ValueError):
@@ -41,6 +44,11 @@ def parse_media_url(raw: str) -> MediaURL:
     platform = HOSTS.get(host)
     if platform is None:
         raise InvalidMediaURL("Этот сервис пока не поддерживается.")
+    if platform == "instagram" and not re.fullmatch(r"/(?:p|reel|tv)/[A-Za-z0-9_-]+/?", parsed.path):
+        raise InvalidMediaURL("Instagram: поддерживаются ссылки на публикации, Reels и видео.")
+    if platform == "pinterest" and not (host == "pin.it" or
+        re.fullmatch(r"/pin/[0-9]+/?", parsed.path)):
+        raise InvalidMediaURL("Pinterest: поддерживаются ссылки на отдельные пины.")
     if platform == "spotify":
         if not re.fullmatch(r"/track/[A-Za-z0-9]{22}/?", parsed.path):
             raise InvalidMediaURL("Spotify: поддерживаются только ссылки на отдельные треки.")

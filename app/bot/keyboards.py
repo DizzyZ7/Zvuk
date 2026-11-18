@@ -1,11 +1,24 @@
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from app.models import SponsorChannel
+from app.services.music_search import SearchResult
 
 def format_keyboard(token: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🎵 Аудио MP3", callback_data=f"fmt:{token}:audio"),
         InlineKeyboardButton(text="🎬 Видео MP4", callback_data=f"fmt:{token}:video"),
     ]])
+
+def search_keyboard(token: str, results: list[SearchResult]) -> InlineKeyboardMarkup:
+    rows = []
+    for number, result in enumerate(results, start=1):
+        label = f"{number}. {result.title}"
+        if result.artist:
+            label += f" — {result.artist}"
+        rows.append([InlineKeyboardButton(
+            text=label[:58], callback_data=f"find:{token}:{number - 1}",
+        )])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
 
 def subscribe_keyboard(channels: list[SponsorChannel]) -> InlineKeyboardMarkup:
     rows = [[InlineKeyboardButton(text=f"📢 {channel.title[:40]}", url=channel.join_url)]
