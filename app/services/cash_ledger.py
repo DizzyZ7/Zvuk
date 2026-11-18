@@ -1,5 +1,5 @@
 """Record realized cash receipts and expenses separately from Stars."""
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
