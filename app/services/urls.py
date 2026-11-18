@@ -14,6 +14,10 @@ HOSTS = {
     "tiktok.com": "tiktok", "www.tiktok.com": "tiktok",
     "vm.tiktok.com": "tiktok", "vt.tiktok.com": "tiktok",
     "open.spotify.com": "spotify",
+    "instagram.com": "instagram", "www.instagram.com": "instagram",
+    "pinterest.com": "pinterest", "www.pinterest.com": "pinterest",
+    "pin.it": "pinterest",
+    "deezer.com": "deezer", "www.deezer.com": "deezer",
 }
 
 class InvalidMediaURL(ValueError):
@@ -41,7 +45,17 @@ def parse_media_url(raw: str) -> MediaURL:
     platform = HOSTS.get(host)
     if platform is None:
         raise InvalidMediaURL("Этот сервис пока не поддерживается.")
-    if platform == "spotify":
+    if platform == "deezer" and not re.fullmatch(r"/(?:[a-z]{2}/)?track/[0-9]+/?", parsed.path):
+        raise InvalidMediaURL("Deezer: поддерживаются ссылки на отдельные треки.")
+    if platform == "instagram" and not re.fullmatch(r"/(?:p|reel|tv)/[A-Za-z0-9_-]+/?", parsed.path):
+        raise InvalidMediaURL("Instagram: поддерживаются ссылки на публикации, Reels и видео.")
+    if platform == "pinterest" and not (host == "pin.it" or
+        re.fullmatch(r"/pin/[0-9]+/?", parsed.path)):
+        raise InvalidMediaURL("Pinterest: поддерживаются ссылки на отдельные пины.")
+    if platform == "deezer":
+        track_id = parsed.path.rstrip("/").split("/")[-1]
+        url = f"https://www.deezer.com/track/{track_id}"
+    elif platform == "spotify":
         if not re.fullmatch(r"/track/[A-Za-z0-9]{22}/?", parsed.path):
             raise InvalidMediaURL("Spotify: поддерживаются только ссылки на отдельные треки.")
         url = f"https://open.spotify.com{parsed.path.rstrip('/')}"
@@ -62,7 +76,7 @@ def parse_media_url(raw: str) -> MediaURL:
                  for v in values if k.lower() not in {"utm_source", "utm_medium", "utm_campaign", "fbclid", "si"}]
         url = urlunsplit(("https", host, parsed.path, urlencode(query), ""))
     return MediaURL(url=url, platform=platform,
-                    default_kind="audio" if platform in {"spotify", "yandex"} else None)
+                    default_kind="audio" if platform in {"spotify", "deezer", "yandex"} else None)
 
 def find_media_url(text: str) -> MediaURL | None:
     found = LINK_RE.search(text)

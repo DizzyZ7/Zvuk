@@ -13,6 +13,7 @@ from redis.exceptions import RedisError
 
 from app.bot.keyboards import admin_keyboard, broadcast_confirmation, broadcast_stop_keyboard
 from app.core.config import Settings
+from app.services.health import health_status
 from app.services.queue import enqueue_broadcast
 from app.services.repository import Repository
 
@@ -34,6 +35,24 @@ class AdminState(StatesGroup):
     editing_ad = State()
     broadcasting = State()
     confirm_broadcast = State()
+
+@router.message(Command("health"))
+async def check_health_command(
+    message: Message, bot: Bot, redis: Redis, repo: Repository,
+) -> None:
+    report = await health_status(bot, redis, repo)
+    await message.answer(report.display())
+
+
+@router.callback_query(F.data == "adm:health")
+async def check_health_button(
+    callback: CallbackQuery, bot: Bot, redis: Redis, repo: Repository,
+) -> None:
+    report = await health_status(bot, redis, repo)
+    if isinstance(callback.message, Message):
+        await callback.message.answer(report.display())
+    await callback.answer()
+
 
 @router.message(Command("admin"))
 async def admin_menu(message: Message, state: FSMContext) -> None:

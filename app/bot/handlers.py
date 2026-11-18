@@ -8,10 +8,11 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
 from redis.asyncio import Redis
 
-from app.bot.keyboards import format_keyboard, subscribe_keyboard
+from app.bot.keyboards import format_keyboard, search_keyboard, subscribe_keyboard
 from app.bot.middlewares import subscription_missing
 from app.core.config import Settings
 from app.services.ad_manager import AdManager
+from app.services.music_search import MusicSearch, MusicSearchError
 from app.services.queue import enqueue_download
 from app.services.repository import Repository
 from app.services.urls import InvalidMediaURL, MediaURL, cache_key, find_media_url, parse_media_url
@@ -26,7 +27,8 @@ async def start(message: Message, users: UserService) -> None:
         await users.register(message.from_user)
     await message.answer(
         "Привет! Отправь ссылку на YouTube, VK, Rutube, TikTok, "
-        "Яндекс.Музыку или трек Spotify. Для видео можно выбрать аудио или видео. "
+        "Яндекс.Музыку, Spotify, Instagram или Pinterest. "
+        "Можешь также написать название песни или исполнителя. "
         "Скачивай только контент, на использование которого у тебя есть права."
     )
 
@@ -69,6 +71,7 @@ async def dispatch_download(
 async def handle_link(
     message: Message, bot: Bot, redis: Redis, repo: Repository,
     users: UserService, ads: AdManager, settings: Settings,
+    music_search: MusicSearch,
 ) -> None:
     if not message.from_user or not message.text:
         return
@@ -80,7 +83,31 @@ async def handle_link(
         await message.answer(str(exc))
         return
     if media is None:
-        await message.answer("Отправь ссылку на поддерживаемое видео или аудио.")
+        await users.register(message.from_user)
+        progress = await message.answer("🔎 Ищу музыку...")
+        try:
+            results = await music_search.search(message.text)
+        except MusicSearchError as exc:
+            await progress.edit_text(str(exc))
+            return
+        if not results:
+            await progress.edit_text(
+                "Ничего не нашел. Попробуйте указать название песни и исполнителя."
+            )
+            return
+        token = uuid4().hex[:16]
+        await redis.set(
+            f"search:{token}",
+            json.dumps({
+                "user": message.from_user.id,
+                "urls": [result.url for result in results],
+            }),
+            ex=900,
+        )
+        await progress.edit_text(
+            "🎵 Вот что нашел. Выберите трек для отправки в MP3:",
+            reply_markup=search_keyboard(token, results),
+        )
         return
     await users.register(message.from_user)
     if media.default_kind:
@@ -125,6 +152,45 @@ async def select_format(
     await callback.answer()
     await dispatch_download(bot, callback.message.chat.id, callback.from_user.id,
                             media, parts[2], repo, redis, ads, settings)
+
+@router.callback_query(F.data.startswith("find:"))
+async def select_search_result(
+    callback: CallbackQuery, bot: Bot, redis: Redis, repo: Repository,
+    users: UserService, ads: AdManager, settings: Settings,
+) -> None:
+    if not callback.from_user or not isinstance(callback.message, Message):
+        await callback.answer("Сообщение недоступно.", show_alert=True)
+        return
+    parts = (callback.data or "").split(":")
+    if len(parts) != 3 or not parts[2].isdigit():
+        await callback.answer("Некорректная кнопка.", show_alert=True)
+        return
+    key = f"search:{parts[1]}"
+    raw = await redis.get(key)
+    if raw is None:
+        await callback.answer("Поиск устарел. Отправьте запрос заново.", show_alert=True)
+        return
+    choice = json.loads(raw)
+    index = int(parts[2])
+    urls = choice.get("urls", [])
+    if choice.get("user") != callback.from_user.id:
+        await callback.answer("Это результаты другого пользователя.", show_alert=True)
+        return
+    if not isinstance(urls, list) or not 0 <= index < len(urls):
+        await callback.answer("Трек недоступен.", show_alert=True)
+        return
+    consumed = await redis.getdel(key)
+    if consumed is None:
+        await callback.answer("Трек уже выбран.", show_alert=True)
+        return
+    media = parse_media_url(urls[index])
+    await users.register(callback.from_user)
+    await callback.answer()
+    await dispatch_download(
+        bot, callback.message.chat.id, callback.from_user.id,
+        media, "audio", repo, redis, ads, settings,
+    )
+
 
 @router.callback_query(F.data == "sub:check")
 async def recheck_subscription(callback: CallbackQuery, bot: Bot, repo: Repository) -> None:

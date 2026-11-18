@@ -10,6 +10,7 @@ from app.core.database import engine, session_factory
 from app.core.redis import make_redis
 from app.core.telegram import make_bot
 from app.services.ad_manager import AdManager
+from app.services.music_search import MusicSearch
 from app.services.repository import Repository
 from app.services.user_service import UserService
 
@@ -33,7 +34,7 @@ async def main() -> None:
         await bot.delete_webhook(drop_pending_updates=False)
         await dp.start_polling(
             bot, settings=settings, redis=redis, repo=repo,
-            ads=AdManager(repo), users=UserService(repo),
+            ads=AdManager(repo), users=UserService(repo), music_search=MusicSearch(),
             handle_signals=True,
         )
     finally:

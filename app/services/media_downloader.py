@@ -7,6 +7,7 @@ from typing import Any
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 from app.core.config import Settings
+from app.services.deezer_resolver import DeezerResolver, DeezerResolutionError
 from app.services.spotify_resolver import SpotifyResolver, SpotifyResolutionError
 from app.services.urls import MediaURL
 
@@ -26,18 +27,24 @@ class MediaDownloader:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.spotify = SpotifyResolver(settings)
+        self.deezer = DeezerResolver()
         self._proxies = itertools.cycle(settings.proxy_list) if settings.proxy_list else None
 
     async def download(self, media: MediaURL, kind: str, folder: Path, *, use_auth_cookies: bool = False) -> DownloadedMedia:
         if kind not in ("audio", "video"):
             raise MediaDownloadError("Неизвестный формат.")
-        if media.platform in ("spotify", "yandex") and kind == "video":
+        if media.platform in ("spotify", "deezer", "yandex") and kind == "video":
             raise MediaDownloadError("Для музыкальных сервисов доступно только аудио.")
         target = media.url
         if media.platform == "spotify":
             try:
                 target = await self.spotify.search_query(media)
             except SpotifyResolutionError as exc:
+                raise MediaDownloadError(str(exc)) from exc
+        if media.platform == "deezer":
+            try:
+                target = await self.deezer.search_query(media)
+            except DeezerResolutionError as exc:
                 raise MediaDownloadError(str(exc)) from exc
         proxy = next(self._proxies) if self._proxies is not None else None
         opts: dict[str, Any] = {

@@ -12,11 +12,21 @@ from app.services.urls import LINK_RE
 
 log = logging.getLogger(__name__)
 
+def is_search_request(event: TelegramObject) -> bool:
+    return (
+        isinstance(event, Message)
+        and event.chat.type == "private"
+        and bool(event.text)
+        and not event.text.startswith("/")
+        and not LINK_RE.search(event.text)
+    )
+
+
 def is_download_request(event: TelegramObject) -> bool:
     if isinstance(event, Message):
         return event.chat.type == "private" and bool(event.text and LINK_RE.search(event.text))
     if isinstance(event, CallbackQuery):
-        return bool(event.data and event.data.startswith("fmt:"))
+        return bool(event.data and event.data.startswith(("fmt:", "find:")))
     return False
 
 class ThrottleMiddleware(BaseMiddleware):
@@ -24,7 +34,7 @@ class ThrottleMiddleware(BaseMiddleware):
         self, handler: Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]],
         event: TelegramObject, data: dict[str, Any],
     ) -> Any:
-        if not is_download_request(event):
+        if not is_download_request(event) and not is_search_request(event):
             return await handler(event, data)
         user = getattr(event, "from_user", None)
         settings: Settings = data["settings"]
@@ -32,13 +42,19 @@ class ThrottleMiddleware(BaseMiddleware):
             redis: Redis = data["redis"]
             # Choosing a format should be immediate after sending a link.
             # A separate callback limiter guards against repeated taps.
-            scope = "format" if isinstance(event, CallbackQuery) else "link"
-            allowed = await redis.set(f"throttle:{scope}:{user.id}", "1", ex=3, nx=True)
+            scope = (
+                "format" if isinstance(event, CallbackQuery)
+                else ("search" if is_search_request(event) else "link")
+            )
+            allowed = await redis.set(
+                f"throttle:{scope}:{user.id}", "1",
+                ex=6 if scope == "search" else 3, nx=True,
+            )
             if not allowed:
                 if isinstance(event, CallbackQuery):
                     await event.answer("Не чаще одного запроса в 3 секунды.", show_alert=False)
                 elif isinstance(event, Message):
-                    await event.answer("⏳ Отправляйте не чаще одной ссылки в 3 секунды.")
+                    await event.answer("⏳ Слишком часто. Повторите запрос через несколько секунд.")
                 return None
         return await handler(event, data)
 
