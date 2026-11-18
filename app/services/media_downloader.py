@@ -47,7 +47,7 @@ class MediaDownloader:
             "outtmpl": str(folder / "%(id)s.%(ext)s"),
             "noplaylist": True,
             "playlistend": 1,
-            "max_downloads": 1,
+            "js_runtimes": {"node": {}},
             "socket_timeout": 30,
             "retries": 2,
             "fragment_retries": 2,

@@ -10,9 +10,16 @@ dependencies = [
   "alembic>=1.15,<2",
   "redis>=5.2,<7",
   "pydantic-settings>=2.8,<3",
-  "yt-dlp>=2025.3.31",
+  "yt-dlp[default]>=2025.3.31",
   "aiohttp>=3.11,<4",
 ]
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "pytest-asyncio>=1,<2", "ruff>=0.11,<1"]
 [tool.ruff]

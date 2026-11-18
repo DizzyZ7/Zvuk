@@ -28,10 +28,14 @@ class MediaURL:
 def parse_media_url(raw: str) -> MediaURL:
     if len(raw) > 2048:
         raise InvalidMediaURL("Слишком длинная ссылка.")
-    parsed = urlsplit(raw)
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError as exc:
+        raise InvalidMediaURL("Некорректная ссылка.") from exc
     if parsed.scheme not in ("https", "http") or not parsed.hostname:
         raise InvalidMediaURL("Нужна ссылка http(s) на поддерживаемый сервис.")
-    if parsed.username or parsed.password or parsed.port is not None:
+    if parsed.username or parsed.password or port is not None:
         raise InvalidMediaURL("Некорректная ссылка.")
     host = parsed.hostname.lower().rstrip(".")
     platform = HOSTS.get(host)

@@ -42,6 +42,8 @@ async def dispatch_download(
                 await bot.send_audio(chat_id, audio=cached, caption=await ads.caption())
             else:
                 await bot.send_video(chat_id, video=cached, caption=await ads.caption())
+            history_id = await repo.new_download(user_id, media.url, key, kind)
+            await repo.update_download(history_id, "success", cache_hit=True)
             return
         except TelegramBadRequest as exc:
             if "wrong file" in str(exc).lower() or "invalid file" in str(exc).lower():

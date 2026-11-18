@@ -1,13 +1,14 @@
 from functools import lru_cache
+from typing import Annotated
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict, NoDecode
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
     bot_token: SecretStr
     telegram_api_id: int
     telegram_api_hash: SecretStr
-    admin_ids: tuple[int, ...] = ()
+    admin_ids: Annotated[tuple[int, ...], NoDecode] = ()
     database_url: str
     redis_url: str
     bot_api_url: str = "http://telegram-bot-api:8081"

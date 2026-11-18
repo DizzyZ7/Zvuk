@@ -166,11 +166,14 @@ class Worker:
                             chat_id=user_id, from_chat_id=job.source_chat_id,
                             message_id=job.source_message_id,
                         )
-                    except TelegramBadRequest:
-                        failed += 1
                     except TelegramForbiddenError:
                         failed += 1
                         await self.repo.user_block(user_id)
+                    except TelegramBadRequest:
+                        failed += 1
+                    except TelegramRetryAfter:
+                        # Telegram is still throttling. Keep this item pending for recovery.
+                        raise
                 except TelegramForbiddenError:
                     failed += 1
                     await self.repo.user_block(user_id)

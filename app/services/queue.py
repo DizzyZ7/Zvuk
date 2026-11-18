@@ -14,10 +14,10 @@ async def ensure_groups(redis: Redis) -> None:
                 raise
 
 async def enqueue_download(redis: Redis, job_id: str) -> None:
-    await redis.xadd(DOWNLOAD_STREAM, {"job_id": job_id}, maxlen=500_000, approximate=True)
+    await redis.xadd(DOWNLOAD_STREAM, {"job_id": job_id})
 
 async def enqueue_broadcast(redis: Redis, job_id: str) -> None:
-    await redis.xadd(BROADCAST_STREAM, {"job_id": job_id}, maxlen=50_000, approximate=True)
+    await redis.xadd(BROADCAST_STREAM, {"job_id": job_id})
 
 async def release_lock(redis: Redis, key: str, token: str) -> None:
     await redis.eval(

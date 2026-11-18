@@ -1,4 +1,3 @@
-import asyncio
 import logging
 from urllib.parse import urlsplit
 
@@ -21,7 +20,10 @@ router = Router(name="admin")
 
 class AdminOnly(Filter):
     async def __call__(self, event: Message | CallbackQuery, settings: Settings) -> bool:
-        return event.from_user is not None and event.from_user.id in settings.admin_ids
+        if event.from_user is None or event.from_user.id not in settings.admin_ids:
+            return False
+        chat_message = event if isinstance(event, Message) else event.message
+        return isinstance(chat_message, Message) and chat_message.chat.type == "private"
 
 router.message.filter(AdminOnly())
 router.callback_query.filter(AdminOnly())
