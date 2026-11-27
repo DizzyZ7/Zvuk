@@ -21,7 +21,8 @@ from app.services.search_sessions import (
 from app.bot.search_ui import render_search
 
 from app.services.repository import Repository
-from app.services.urls import InvalidMediaURL, MediaURL, cache_key, find_media_url, parse_media_url
+from app.services.urls import (LINK_RE, InvalidMediaURL, MediaURL, cache_key,
+                               find_media_url, parse_media_url, short_video_label)
 from app.services.user_service import UserService
 
 log = logging.getLogger(__name__)
@@ -55,15 +56,32 @@ async def dispatch_download(
     """
     owner_id = user_id if settings.ytdlp_cookies and user_id in settings.admin_ids else None
     key = cache_key(media, kind, owner_id=owner_id)
-    status, job_id = await repo.reserve_download(
-        user_id, media.url, key, kind, settings.max_pending_per_user,
-    )
+    if kind == "clip":
+        status, job_id = await repo.reserve_clip_download(
+            user_id, media.url, key,
+            cache_key(media, "video", owner_id=owner_id),
+            cache_key(media, "audio", owner_id=owner_id),
+            settings.max_pending_per_user,
+        )
+    else:
+        status, job_id = await repo.reserve_download(
+            user_id, media.url, key, kind, settings.max_pending_per_user,
+        )
     if status != "reserved":
         if notify_rejection:
             await bot.send_message(chat_id, download_status_message(status, settings))
         return status
     assert job_id is not None
     try:
+        # Clip jobs are handled by the worker as two linked artifacts; there
+        # is no single cached Telegram file_id for the combined result.
+        if kind == "clip":
+            await enqueue_download(redis, job_id)
+            await bot.send_message(
+                chat_id,
+                "🎬 Ссылка принята. Пришлю видео и следом MP3 со звуком из него.",
+            )
+            return "queued"
         cached = await repo.cache_get(key)
         if cached:
             placement = await ads.placement(user_id)
@@ -95,7 +113,7 @@ async def dispatch_download(
 
 def download_status_message(status: str, settings: Settings) -> str:
     if status == "downloaded":
-        return "✅ Этот файл уже отправлялся тебе. Повторная загрузка отключена."
+        return "✅ Ты уже получал этот файл. Повторная загрузка не требуется."
     if status == "pending":
         return "⏳ Этот файл уже скачивается или ожидает отправки."
     if status == "limit":
@@ -143,6 +161,15 @@ async def handle_link(
         )
         return
     await users.register(message.from_user)
+    matched_link = LINK_RE.search(message.text)
+    short_label = short_video_label(matched_link.group(0)) if matched_link else None
+    if short_label in {"YouTube Shorts", "Instagram Reels", "TikTok"}:
+        # These short-form links always deliver BOTH outputs, no format chooser.
+        await dispatch_download(
+            bot, message.chat.id, message.from_user.id,
+            media, "clip", repo, redis, ads, settings,
+        )
+        return
     token = uuid4().hex[:16]
     await redis.set(
         f"choice:{token}", json.dumps({"user": message.from_user.id, "url": media.url}),

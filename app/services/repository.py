@@ -70,6 +70,46 @@ class Repository:
                 cache_hit=cache_hit, finished_at=datetime.now(timezone.utc),
             ))
 
+    async def reserve_clip_download(
+        self, user_id: int, url: str, key: str,
+        video_key: str, audio_key: str, max_pending: int,
+    ) -> tuple[str, str | None]:
+        """Avoid a clip job if both outputs were already delivered separately."""
+        async with self.factory.begin() as session:
+            await session.execute(select(func.pg_advisory_xact_lock(user_id)))
+            rows = (await session.execute(
+                select(DownloadHistory.cache_key, DownloadHistory.status)
+                .where(
+                    DownloadHistory.user_id == user_id,
+                    DownloadHistory.cache_key.in_([key, video_key, audio_key]),
+                    DownloadHistory.status.in_(("success", "queued", "processing")),
+                )
+            )).all()
+            states: dict[str, set[str]] = {}
+            for k, state in rows:
+                states.setdefault(k, set()).add(state)
+            if "success" in states.get(key, set()) or all(
+                "success" in states.get(output, set())
+                for output in (video_key, audio_key)
+            ):
+                return "downloaded", None
+            if states.get(key, set()) & {"queued", "processing"}:
+                return "pending", None
+            active = await session.scalar(
+                select(func.count()).select_from(DownloadHistory).where(
+                    DownloadHistory.user_id == user_id,
+                    DownloadHistory.status.in_(("queued", "processing")),
+                )
+            )
+            if int(active or 0) >= max_pending:
+                return "limit", None
+            job_id = uuid4().hex
+            session.add(DownloadHistory(
+                id=job_id, user_id=user_id, url=url,
+                cache_key=key, kind="clip", status="queued",
+            ))
+            return "reserved", job_id
+
     async def reserve_download(
         self, user_id: int, url: str, key: str, kind: str, max_pending: int,
     ) -> tuple[str, str | None]:
