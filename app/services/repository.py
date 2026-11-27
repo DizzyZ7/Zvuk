@@ -58,6 +58,18 @@ class Repository:
                                         cache_key=key, kind=kind, status="queued"))
         return job_id
 
+    async def record_delivered_output(
+        self, user_id: int, url: str, key: str, kind: str, *,
+        cache_hit: bool = False,
+    ) -> None:
+        """Track clip outputs independently to avoid replay on partial retries."""
+        async with self.factory.begin() as session:
+            session.add(DownloadHistory(
+                id=uuid4().hex, user_id=user_id, url=url,
+                cache_key=key, kind=kind, status="success",
+                cache_hit=cache_hit, finished_at=datetime.now(timezone.utc),
+            ))
+
     async def reserve_download(
         self, user_id: int, url: str, key: str, kind: str, max_pending: int,
     ) -> tuple[str, str | None]:
