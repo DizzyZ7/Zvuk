@@ -1,6 +1,5 @@
 """No internet calls: exercise the single-download dual-output contract."""
 import tempfile
-from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
