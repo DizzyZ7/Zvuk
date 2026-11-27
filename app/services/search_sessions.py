@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass
 from uuid import uuid4
 
-from redis.asyncio import Redis
+from app.core.state import StateStore
 
 from app.services.music_search import SearchResult
 
@@ -36,7 +36,7 @@ def session_key(token: str) -> str:
 
 
 async def create_search(
-    redis: Redis, user_id: int, results: list[SearchResult], *,
+    redis: StateStore, user_id: int, results: list[SearchResult], *,
     query: str = "",
 ) -> str:
     if not 1 <= len(results) <= 10:
@@ -57,7 +57,7 @@ async def create_search(
     return token
 
 
-async def read_search(redis: Redis, token: str, user_id: int) -> SearchSession:
+async def read_search(redis: StateStore, token: str, user_id: int) -> SearchSession:
     raw = await redis.get(session_key(token))
     if raw is None:
         raise SearchSessionError(

@@ -6,7 +6,7 @@ from aiogram import Bot, F, Router
 from aiogram.filters import CommandStart
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
-from redis.asyncio import Redis
+from app.core.state import StateStore
 
 from app.bot.keyboards import format_keyboard, search_keyboard, subscribe_keyboard
 from app.bot.middlewares import subscription_missing
@@ -46,7 +46,7 @@ async def start(message: Message, users: UserService) -> None:
 
 async def dispatch_download(
     bot: Bot, chat_id: int, user_id: int, media: MediaURL, kind: str,
-    repo: Repository, redis: Redis, ads: AdManager, settings: Settings,
+    repo: Repository, redis: StateStore, ads: AdManager, settings: Settings,
     *, notify_rejection: bool = True,
 ) -> str:
     """Reserve a download in PostgreSQL before touching Redis or YouTube.
@@ -129,7 +129,7 @@ def download_status_message(status: str, settings: Settings) -> str:
 
 @router.message(F.chat.type == "private", F.text)
 async def handle_link(
-    message: Message, bot: Bot, redis: Redis, repo: Repository,
+    message: Message, bot: Bot, redis: StateStore, repo: Repository,
     users: UserService, ads: AdManager, settings: Settings,
     music_search: MusicSearch,
 ) -> None:
@@ -189,7 +189,7 @@ async def handle_link(
 
 @router.callback_query(F.data.startswith("fmt:"))
 async def select_format(
-    callback: CallbackQuery, bot: Bot, redis: Redis, repo: Repository,
+    callback: CallbackQuery, bot: Bot, redis: StateStore, repo: Repository,
     users: UserService, ads: AdManager, settings: Settings,
 ) -> None:
     if not callback.from_user or not isinstance(callback.message, Message):
@@ -240,7 +240,7 @@ async def _search_download_states(
 
 
 async def _search_callback_context(
-    callback: CallbackQuery, redis: Redis, token: str,
+    callback: CallbackQuery, redis: StateStore, token: str,
 ):
     if not callback.from_user or not isinstance(callback.message, Message):
         await callback.answer("Сообщение недоступно.", show_alert=True)
@@ -271,7 +271,7 @@ async def _refresh_search(
 
 @router.callback_query(F.data.startswith("find:"))
 async def select_search_result(
-    callback: CallbackQuery, bot: Bot, redis: Redis, repo: Repository,
+    callback: CallbackQuery, bot: Bot, redis: StateStore, repo: Repository,
     users: UserService, ads: AdManager, settings: Settings,
 ) -> None:
     parts = (callback.data or "").split(":")
@@ -310,7 +310,7 @@ async def select_search_result(
 
 @router.callback_query(F.data.startswith("searchpage:"))
 async def browse_search_page(
-    callback: CallbackQuery, redis: Redis, repo: Repository, settings: Settings,
+    callback: CallbackQuery, redis: StateStore, repo: Repository, settings: Settings,
 ) -> None:
     parts = (callback.data or "").split(":")
     if len(parts) != 3 or not parts[2].isdigit():

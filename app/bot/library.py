@@ -2,7 +2,7 @@
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
-from redis.asyncio import Redis
+from app.core.state import StateStore
 
 from app.bot.handlers import dispatch_download
 from app.bot.keyboards import library_keyboard
@@ -58,7 +58,7 @@ async def show_library(message: Message, library: TrackLibrary) -> None:
 
 @router.callback_query(F.data.startswith("stash:"))
 async def save_search_result(
-    callback: CallbackQuery, redis: Redis, library: TrackLibrary,
+    callback: CallbackQuery, redis: StateStore, library: TrackLibrary,
     users: UserService,
 ) -> None:
     if not callback.from_user:
@@ -83,7 +83,7 @@ async def save_search_result(
 
 @router.callback_query(F.data.startswith("libplay:"))
 async def play_saved(
-    callback: CallbackQuery, bot: Bot, repo: Repository, redis: Redis,
+    callback: CallbackQuery, bot: Bot, repo: Repository, redis: StateStore,
     ads: AdManager, settings: Settings, library: TrackLibrary,
 ) -> None:
     if not callback.from_user or not isinstance(callback.message, Message):

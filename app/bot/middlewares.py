@@ -4,7 +4,7 @@ from aiogram import BaseMiddleware, Bot
 from aiogram.enums import ChatMemberStatus
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import CallbackQuery, Message, TelegramObject
-from redis.asyncio import Redis
+from app.core.state import StateStore
 from app.core.config import Settings
 from app.bot.keyboards import subscribe_keyboard
 from app.services.repository import Repository
@@ -44,7 +44,7 @@ class ThrottleMiddleware(BaseMiddleware):
         user = getattr(event, "from_user", None)
         settings: Settings = data["settings"]
         if user and user.id not in settings.admin_ids:
-            redis: Redis = data["redis"]
+            redis: StateStore = data["redis"]
             scope = "search" if is_search_request(event) else "link"
             allowed = await redis.set(
                 f"throttle:{scope}:{user.id}", "1",

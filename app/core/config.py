@@ -10,7 +10,6 @@ class Settings(BaseSettings):
     telegram_api_hash: SecretStr
     admin_ids: Annotated[tuple[int, ...], NoDecode] = ()
     database_url: str
-    redis_url: str
     bot_api_url: str = "http://telegram-bot-api:8081"
     spotify_client_id: str = ""
     audd_api_token: SecretStr = SecretStr("")

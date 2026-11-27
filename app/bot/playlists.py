@@ -2,7 +2,7 @@
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from redis.asyncio import Redis
+from app.core.state import StateStore
 
 from app.bot.handlers import dispatch_download
 from app.core.config import Settings
@@ -147,7 +147,7 @@ async def show_playlist(
 @router.callback_query(F.data.startswith("plplay:"))
 async def play_playlist_track(
     callback: CallbackQuery, playlists: PlaylistService,
-    bot: Bot, repo: Repository, redis: Redis, ads: AdManager, settings: Settings,
+    bot: Bot, repo: Repository, redis: StateStore, ads: AdManager, settings: Settings,
 ) -> None:
     if not callback.from_user or not isinstance(callback.message, Message):
         return
@@ -202,7 +202,7 @@ def destination_keyboard(playlists, *, origin: str, index: int) -> InlineKeyboar
 
 @router.callback_query(F.data.startswith("pls:"))
 async def choose_search_playlist(
-    callback: CallbackQuery, redis: Redis, playlists: PlaylistService,
+    callback: CallbackQuery, redis: StateStore, playlists: PlaylistService,
 ) -> None:
     if not callback.from_user or not isinstance(callback.message, Message):
         return
@@ -233,7 +233,7 @@ async def choose_search_playlist(
 
 @router.callback_query(F.data.startswith("plsave:"))
 async def save_search_to_playlist(
-    callback: CallbackQuery, redis: Redis, playlists: PlaylistService,
+    callback: CallbackQuery, redis: StateStore, playlists: PlaylistService,
 ) -> None:
     if not callback.from_user or not isinstance(callback.message, Message):
         return

@@ -3,7 +3,7 @@ import asyncio
 from dataclasses import dataclass
 
 from aiogram import Bot
-from redis.asyncio import Redis
+from app.core.state import StateStore
 from sqlalchemy import text
 
 from app.services.repository import Repository
@@ -23,13 +23,13 @@ class HealthStatus:
             "🧪 Проверка Zvuk\n\n"
             f"{icon(self.telegram)} Telegram Bot API\n"
             f"{icon(self.postgres)} PostgreSQL\n"
-            f"{icon(self.redis)} Redis\n"
+            f"{icon(self.redis)} PostgreSQL state\n"
             f"{icon(self.worker)} Media worker\n\n"
             "Это проверка компонентов, а не тест реального скачивания."
         )
 
 
-async def health_status(bot: Bot, redis: Redis, repo: Repository) -> HealthStatus:
+async def health_status(bot: Bot, redis: StateStore, repo: Repository) -> HealthStatus:
     async def telegram_ok() -> bool:
         try:
             await asyncio.wait_for(bot.get_me(), timeout=5)
