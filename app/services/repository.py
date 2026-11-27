@@ -4,7 +4,7 @@ from uuid import uuid4
 from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
-from app.models import (AdCampaign, AdPost, AppState, Broadcast, DeliveryReceipt, DownloadHistory, MediaCache,
+from app.models import (AdCampaign, AdPost, Broadcast, DeliveryReceipt, DownloadHistory, MediaCache,
                         PremiumGrant, PremiumPayment, SponsorChannel, User)
 from app.core.state import StateStore
 
