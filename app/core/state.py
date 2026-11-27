@@ -4,12 +4,19 @@ This replaces Redis for search/format buttons, temporary locks, and counters.
 No separate process or Redis protocol server is required.
 """
 from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator
+import hashlib
+import asyncio
+
+import asyncpg
 
 from sqlalchemy import delete, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.models.entities import AppState
+from app.core.config import settings
 
 
 class StateStore:
@@ -128,6 +135,34 @@ class StateStore:
                         key=key, value="1", expires_at=expiry,
                     ))
         return 0
+
+    @asynccontextmanager
+    async def media_lock(self, key: str) -> AsyncIterator[None]:
+        """Crash-safe lock held by a PostgreSQL connection, not a 2h TTL key.
+
+        If the worker dies, PostgreSQL releases this advisory lock automatically.
+        Other workers wait on the lock and then reuse the finished file_id.
+        """
+        digest = hashlib.sha256(key.encode("utf-8")).digest()
+        lock_number = int.from_bytes(digest[:8], "big", signed=True)
+        dsn = settings.database_url.replace(
+            "postgresql+asyncpg://", "postgresql://", 1,
+        )
+        conn = await asyncpg.connect(dsn=dsn)
+        try:
+            await asyncio.wait_for(
+                conn.fetchval("SELECT pg_advisory_lock($1::bigint)", lock_number),
+                timeout=max(1800, settings.max_duration_sec * 3),
+            )
+            yield
+        finally:
+            try:
+                if not conn.is_closed():
+                    await conn.fetchval(
+                        "SELECT pg_advisory_unlock($1::bigint)", lock_number,
+                    )
+            finally:
+                await conn.close()
 
     async def prune_expired(self) -> int:
         async with self.factory.begin() as session:

@@ -20,7 +20,7 @@ from app.services.ad_manager import AdManager
 from app.services.housekeeping import prune_orphaned_workdirs
 from app.services.media_downloader import AUDIO_KINDS, DownloadedMedia, MediaDownloadError, MediaDownloader
 from app.services.queue import (
-    BROADCAST_STREAM, DOWNLOAD_STREAM, listen_for_jobs, release_lock,
+    BROADCAST_STREAM, DOWNLOAD_STREAM, listen_for_jobs,
 )
 from app.services.repository import Repository
 from app.services.urls import cache_key, parse_media_url
@@ -146,14 +146,7 @@ class Worker:
         # Concurrent requests for the same clip should wait instead of
         # running two yt-dlp extractors against Instagram/TikTok/YouTube.
         lock = f"media-lock:{job.cache_key}"
-        token = uuid4().hex
-        for _ in range(300):
-            if await self.redis.set(lock, token, ex=7200, nx=True):
-                break
-            await asyncio.sleep(2)
-        else:
-            raise MediaDownloadError("Ожидание обработки ролика превысило лимит.")
-        try:
+        async with self.redis.media_lock(lock):
             # Re-check cached output after acquiring the cross-user media lock.
             video_id = await self.repo.cache_get(video_key)
             audio_id = await self.repo.cache_get(audio_key)
@@ -216,8 +209,6 @@ class Worker:
                     "🎬 Видео отправлено, но отдельной звуковой дорожки "
                     "в нем нет — MP3 создать невозможно.",
                 )
-        finally:
-            await release_lock(self.redis, lock, token)
 
     async def notify_failure(self, user_id: int, error: str) -> None:
         try:
@@ -248,36 +239,25 @@ class Worker:
                         await self.repo.cache_drop(key)
                     else:
                         raise
-            lock_key = f"media-lock:{key}"
-            token = uuid4().hex
-            # Guard upload and download; a follower can reuse the resulting file_id.
-            ttl = max(7200, settings.max_duration_sec * 3)
-            obtained = await self.redis.set(lock_key, token, ex=ttl, nx=True)
-            if not obtained:
-                await self._await_other_download(job.user_id, kind, key, lock_key)
-                await self.repo.update_download(job_id, "success", cache_hit=True)
-                return
-            try:
+            async with self.redis.media_lock(f"media-lock:{key}"):
                 file_id = await self.repo.cache_get(key)
                 if file_id:
                     await self.send_cached(job.user_id, kind, file_id)
                     hit = True
                 else:
                     with tempfile.TemporaryDirectory(prefix="zvuk_", dir="/shared") as folder:
-                        # The Local Bot API runs in another container and must be
-                        # able to traverse this temporary directory.
                         Path(folder).chmod(0o755)
                         media = await self.downloader.download(
                             parse_media_url(job.url), kind, Path(folder),
-                            use_auth_cookies=bool(settings.ytdlp_cookies and
-                                                  job.user_id in settings.admin_ids),
+                            use_auth_cookies=bool(
+                                settings.ytdlp_cookies and
+                                job.user_id in settings.admin_ids
+                            ),
                         )
                         media.path.chmod(0o644)
                         file_id = await self.send_media(job.user_id, kind, media)
                         await self.repo.cache_put(key, file_id, kind)
                 await self.repo.update_download(job_id, "success", cache_hit=hit)
-            finally:
-                await release_lock(self.redis, lock_key, token)
         except TelegramEntityTooLarge:
             error = "Telegram отклонил файл: превышен допустимый размер."
             await self.repo.update_download(job_id, "failed", error=error)
@@ -305,26 +285,6 @@ class Worker:
             )
             await self.repo.update_download(job_id, "failed", error=error)
             await self.notify_failure(job.user_id, error)
-
-    async def _await_other_download(
-        self, chat_id: int, kind: str, key: str, lock_key: str,
-    ) -> None:
-        deadline = asyncio.get_running_loop().time() + max(7200, settings.max_duration_sec * 3)
-        while asyncio.get_running_loop().time() < deadline:
-            await asyncio.sleep(3)
-            cached = await self.repo.cache_get(key)
-            if cached:
-                try:
-                    await self.send_cached(chat_id, kind, cached)
-                    return
-                except TelegramBadRequest as exc:
-                    if "wrong file" in str(exc).lower() or "invalid file" in str(exc).lower():
-                        await self.repo.cache_drop(key)
-                    else:
-                        raise
-            if not await self.redis.exists(lock_key):
-                raise MediaDownloadError("Параллельное скачивание завершилось без файла. Повторите запрос.")
-        raise MediaDownloadError("Превышено время ожидания другого скачивания.")
 
     @staticmethod
     def progress_text(processed: int, total: int, failed: int, done: bool) -> str:
