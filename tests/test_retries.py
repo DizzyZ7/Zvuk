@@ -2,7 +2,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from redis.exceptions import ConnectionError
+from sqlalchemy.exc import OperationalError
 
 from app.worker import Worker
 
@@ -14,7 +14,7 @@ def make_worker(retry_count: int):
     repo = SimpleNamespace(
         download=AsyncMock(return_value=job),
         update_download=AsyncMock(),
-        cache_get=AsyncMock(side_effect=ConnectionError("temporary Redis failure")),
+        cache_get=AsyncMock(side_effect=OperationalError("SELECT", {}, Exception("DB outage"))),
         record_download_retry=AsyncMock(return_value=retry_count),
     )
     worker = Worker.__new__(Worker)
@@ -26,9 +26,9 @@ def make_worker(retry_count: int):
 
 
 @pytest.mark.asyncio
-async def test_transient_redis_error_is_retried():
+async def test_transient_postgresql_error_is_retried():
     worker, repo = make_worker(retry_count=1)
-    with pytest.raises(ConnectionError):
+    with pytest.raises(OperationalError):
         await worker.process_download("job")
     assert repo.record_download_retry.await_count == 1
     assert not any(call.args[1] == "failed" for call in repo.update_download.await_args_list)
