@@ -187,3 +187,27 @@ async def test_full_youtube_watch_keeps_manual_format_picker():
     message.answer.assert_awaited_once()
     assert message.answer.await_args.kwargs["reply_markup"]
     repo.reserve_clip_download.assert_not_awaited()
+
+
+
+@pytest.mark.asyncio
+async def test_short_clip_job_remains_queued_if_telegram_acknowledgement_fails():
+    repo = SimpleNamespace(
+        reserve_clip_download=AsyncMock(return_value=("reserved", "clip-99")),
+        update_download=AsyncMock(),
+        cache_get=AsyncMock(),
+    )
+    bot = AsyncMock()
+    bot.send_message.side_effect = ConnectionError("Telegram connection dropped")
+    redis = AsyncMock()
+    with pytest.raises(ConnectionError):
+        await dispatch_download(
+            bot, 42, 42,
+            parse_media_url("https://www.instagram.com/reel/DgLOE34yzwp/"),
+            "clip", repo, redis, AsyncMock(), settings,
+        )
+    redis.xadd.assert_awaited_once_with(
+        "zvuk:downloads", {"job_id": "clip-99"},
+    )
+    # A failed confirmation message must not cancel an already-enqueued job.
+    repo.update_download.assert_not_awaited()
