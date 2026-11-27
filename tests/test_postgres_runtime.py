@@ -5,7 +5,7 @@ from uuid import uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, select
+from sqlalchemy import delete
 
 from app.core.database import engine, session_factory
 from app.core.fsm import PostgresFSMStorage
@@ -97,7 +97,13 @@ async def test_notifier_wakes_worker_only_after_durable_job_commit():
         status, job_id = await repo.reserve_download(uid, media.url, key, "audio", 5)
         assert status == "reserved"
         await asyncio.wait_for(wake.wait(), timeout=5)
-    assert await repo.claim_next_job("download") == job_id
+    # Other integration tests may have left queued rows; SKIP LOCKED is FIFO.
+    claimed_id = None
+    for _ in range(50):
+        claimed_id = await repo.claim_next_job("download")
+        if claimed_id == job_id:
+            break
+    assert claimed_id == job_id
     claimed = await repo.download(job_id)
     assert claimed.status == "processing"
     assert claimed.lease_until is not None
