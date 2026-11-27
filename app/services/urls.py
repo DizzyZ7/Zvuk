@@ -11,7 +11,7 @@ HOSTS = {
     "vk.com": "vk", "m.vk.com": "vk", "vkvideo.ru": "vk",
     "music.yandex.ru": "yandex", "music.yandex.com": "yandex",
     "rutube.ru": "rutube", "www.rutube.ru": "rutube",
-    "tiktok.com": "tiktok", "www.tiktok.com": "tiktok",
+    "tiktok.com": "tiktok", "www.tiktok.com": "tiktok", "m.tiktok.com": "tiktok",
     "vm.tiktok.com": "tiktok", "vt.tiktok.com": "tiktok",
     "open.spotify.com": "spotify",
     "instagram.com": "instagram", "www.instagram.com": "instagram",
@@ -47,8 +47,20 @@ def parse_media_url(raw: str) -> MediaURL:
         raise InvalidMediaURL("Этот сервис пока не поддерживается.")
     if platform == "deezer" and not re.fullmatch(r"/(?:[a-z]{2}/)?track/[0-9]+/?", parsed.path):
         raise InvalidMediaURL("Deezer: поддерживаются ссылки на отдельные треки.")
-    if platform == "instagram" and not re.fullmatch(r"/(?:p|reel|tv)/[A-Za-z0-9_-]+/?", parsed.path):
+    if platform == "instagram" and not re.fullmatch(r"/(?:p|reels?|tv)/[A-Za-z0-9_-]+/?", parsed.path):
         raise InvalidMediaURL("Instagram: поддерживаются ссылки на публикации, Reels и видео.")
+    if platform == "tiktok":
+        if host in {"vm.tiktok.com", "vt.tiktok.com"}:
+            valid = bool(re.fullmatch(r"/[A-Za-z0-9_-]+/?", parsed.path))
+        else:
+            valid = bool(
+                re.fullmatch(r"/@[A-Za-z0-9._-]+/video/[0-9]+/?", parsed.path)
+                or re.fullmatch(r"/t/[A-Za-z0-9_-]+/?", parsed.path)
+            )
+        if not valid:
+            raise InvalidMediaURL(
+                "TikTok: пришлите ссылку на отдельное видео, не на профиль или ленту."
+            )
     if platform == "pinterest" and not (host == "pin.it" or
         re.fullmatch(r"/pin/[0-9]+/?", parsed.path)):
         raise InvalidMediaURL("Pinterest: поддерживаются ссылки на отдельные пины.")
@@ -59,6 +71,19 @@ def parse_media_url(raw: str) -> MediaURL:
         if not re.fullmatch(r"/track/[A-Za-z0-9]{22}/?", parsed.path):
             raise InvalidMediaURL("Spotify: поддерживаются только ссылки на отдельные треки.")
         url = f"https://open.spotify.com{parsed.path.rstrip('/')}"
+    elif platform == "instagram":
+        # Link-sharing and Instagram-specific query parameters are not needed
+        # to fetch the same Reel and should not create separate cache entries.
+        segments = parsed.path.strip("/").split("/")
+        kind, shortcode = segments[0], segments[1]
+        if kind == "reels":
+            kind = "reel"
+        url = f"https://www.instagram.com/{kind}/{shortcode}/"
+    elif platform == "tiktok":
+        # Strip tracking tokens, leave shortlinks untouched for yt-dlp's
+        # canonical redirect resolution. Full video links get stable hosts.
+        clean_host = host if host in {"vm.tiktok.com", "vt.tiktok.com"} else "www.tiktok.com"
+        url = f"https://{clean_host}{parsed.path.rstrip('/')}"
     elif platform == "youtube":
         video_id = ""
         if host == "youtu.be":
@@ -77,6 +102,24 @@ def parse_media_url(raw: str) -> MediaURL:
         url = urlunsplit(("https", host, parsed.path, urlencode(query), ""))
     return MediaURL(url=url, platform=platform,
                     default_kind="audio" if platform in {"spotify", "deezer", "yandex"} else None)
+
+def short_video_label(raw_url: str) -> str | None:
+    """Present a short-form video workflow without an extra network request."""
+    parsed = urlsplit(raw_url)
+    host = (parsed.hostname or "").lower().rstrip(".")
+    path = parsed.path
+    if host in {"youtube.com", "www.youtube.com", "m.youtube.com"}:
+        if re.fullmatch(r"/shorts/[A-Za-z0-9_-]{11}/?", path):
+            return "YouTube Shorts"
+    if host in {"instagram.com", "www.instagram.com"}:
+        if re.fullmatch(r"/reels?/[A-Za-z0-9_-]+/?", path):
+            return "Instagram Reels"
+        if re.fullmatch(r"/(?:p|tv)/[A-Za-z0-9_-]+/?", path):
+            return "Instagram"
+    if HOSTS.get(host) == "tiktok":
+        return "TikTok"
+    return None
+
 
 def find_media_url(text: str) -> MediaURL | None:
     found = LINK_RE.search(text)
