@@ -406,51 +406,112 @@ class Worker:
         except TelegramBadRequest:
             pass
 
-    async def consume(self, stream: str, concurrency_id: int) -> None:
-        consumer = f"{self.consumer}-{concurrency_id}"
+    async def _handle_stream_event(
+        self, stream: str, consumer: str, event_id: str, payload: dict,
+    ) -> None:
+        """Process one actual queue event. Only acknowledge after success."""
+        job_id = payload.get("job_id")
+        if not job_id:
+            await acknowledge(self.redis, stream, event_id)
+            return
+        try:
+            async with keep_pending_alive(self.redis, stream, consumer, event_id):
+                if stream == DOWNLOAD_STREAM:
+                    await self.process_download(job_id)
+                else:
+                    await self.process_broadcast(job_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Never ACK transient infrastructure failures. The recovery task
+            # claims abandoned PEL entries when they become stale.
+            log.exception("Worker failed handling %s %s", stream, job_id)
+        else:
+            await acknowledge(self.redis, stream, event_id)
+
+    async def _recover_abandoned(
+        self, stream: str, consumer: str, gate: asyncio.Lock,
+    ) -> None:
+        """Rare crash recovery, independent of the event-driven reader.
+
+        Unlike the old loop, XAUTOCLAIM is never executed after each empty
+        queue read. At startup and then every ten minutes, claim at most
+        25 abandoned events. Long-running healthy jobs renew PEL idle time
+        in keep_pending_alive(), so recovery does not steal their work.
+        """
         while True:
             try:
-                # Reclaim abandoned jobs after 3 minutes; live jobs renew PEL every 45s.
-                stale = await self.redis.xautoclaim(
-                    stream, GROUP, consumer, min_idle_time=STALE_AFTER_MS,
-                    start_id="0-0", count=1,
-                )
-                messages = stale[1] if len(stale) > 1 else []
-                if not messages:
-                    entries = await self.redis.xreadgroup(
-                        GROUP, consumer, {stream: ">"}, count=1, block=3000,
+                for _ in range(25):
+                    stale = await self.redis.xautoclaim(
+                        stream, GROUP, consumer, min_idle_time=STALE_AFTER_MS,
+                        start_id="0-0", count=1,
                     )
-                    messages = entries[0][1] if entries else []
-                for event_id, payload in messages:
-                    job_id = payload.get("job_id")
-                    if not job_id:
-                        await acknowledge(self.redis, stream, event_id)
-                        continue
-                    try:
-                        async with keep_pending_alive(self.redis, stream, consumer, event_id):
-                            if stream == DOWNLOAD_STREAM:
-                                await self.process_download(job_id)
-                            else:
-                                await self.process_broadcast(job_id)
-                    except Exception:
-                        # Do not ACK infrastructure failures; reclaim after timeout.
-                        log.exception("Worker crashed handling %s %s", stream, job_id)
-                    else:
-                        await acknowledge(self.redis, stream, event_id)
+                    messages = stale[1] if len(stale) > 1 else []
+                    if not messages:
+                        break
+                    for event_id, payload in messages:
+                        # Reclaiming and regular delivery must not start two
+                        # downloads concurrently in the same consumer.
+                        async with gate:
+                            await self._handle_stream_event(
+                                stream, consumer, event_id, payload,
+                            )
             except asyncio.CancelledError:
                 raise
             except Exception:
-                log.exception("Queue consumer error")
-                await asyncio.sleep(3)
+                log.exception("Could not recover stale %s events", stream)
+            await asyncio.sleep(600)
+
+    async def consume(self, stream: str, concurrency_id: int) -> None:
+        """Wait for XADD, without polling Redis every three seconds.
+
+        XREADGROUP BLOCK 0 keeps a TCP connection parked until a new task is
+        added by a Telegram handler. Redis Streams consumer groups provide
+        durable delivery through temporary connection failures. A separate,
+        infrequent recovery coroutine handles jobs abandoned by crashes.
+        """
+        consumer = f"{self.consumer}-{concurrency_id}"
+        gate = asyncio.Lock()
+        recovery = asyncio.create_task(
+            self._recover_abandoned(stream, consumer, gate),
+            name=f"recovery:{stream}:{consumer}",
+        )
+        try:
+            while True:
+                try:
+                    entries = await self.redis.xreadgroup(
+                        GROUP, consumer, {stream: ">"}, count=1, block=0,
+                    )
+                    for _stream_name, messages in entries:
+                        for event_id, payload in messages:
+                            async with gate:
+                                await self._handle_stream_event(
+                                    stream, consumer, event_id, payload,
+                                )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("Queue connection failed: %s", stream)
+                    # Retry only after a genuine connection/error condition,
+                    # never as part of an idle polling loop.
+                    await asyncio.sleep(3)
+        finally:
+            recovery.cancel()
+            try:
+                await recovery
+            except asyncio.CancelledError:
+                pass
 
     async def heartbeat(self) -> None:
+        # One status write every two minutes, rather than four per minute.
+        # Stale status expires after six minutes if the worker crashes.
         key = f"zvuk:worker:alive:{self.consumer}"
         while True:
             try:
-                await self.redis.set(key, "1", ex=40)
+                await self.redis.set(key, "1", ex=360)
             except RedisError:
                 log.warning("Unable to publish worker heartbeat")
-            await asyncio.sleep(15)
+            await asyncio.sleep(120)
 
     async def run(self) -> None:
         await ensure_groups(self.redis)
