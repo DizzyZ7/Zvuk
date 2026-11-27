@@ -100,6 +100,114 @@ async def test_redis_queue_failure_releases_database_reservation():
 
 
 def test_friendly_rejection_messages():
-    assert "уже отправлялся" in download_status_message("downloaded", settings)
+    assert "уже получал" in download_status_message("downloaded", settings)
     assert "уже скачивается" in download_status_message("pending", settings)
     assert "ожидающих" in download_status_message("limit", settings)
+
+
+
+@pytest.mark.asyncio
+async def test_short_video_link_starts_one_dual_output_job_without_format_picker():
+    from app.bot.handlers import handle_link
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=42),
+        chat=SimpleNamespace(id=42),
+        text=(
+            "https://www.instagram.com/reel/DgLOE34yzwp/"
+            "?lqvp=MXYzZmlU2ZjNmbWEybg%3D%3D"
+        ),
+        answer=AsyncMock(),
+    )
+    bot, redis = AsyncMock(), AsyncMock()
+    repo = SimpleNamespace(
+        reserve_clip_download=AsyncMock(return_value=("reserved", "job-clip")),
+        update_download=AsyncMock(),
+        cache_get=AsyncMock(),
+    )
+    await handle_link(
+        message, bot, redis, repo,
+        SimpleNamespace(register=AsyncMock()), AsyncMock(), settings,
+        SimpleNamespace(search=AsyncMock()),
+    )
+    repo.reserve_clip_download.assert_awaited_once()
+    assert repo.reserve_clip_download.await_args.args[1] == (
+        "https://www.instagram.com/reel/DgLOE34yzwp/"
+    )
+    redis.xadd.assert_awaited_once()
+    message.answer.assert_not_awaited()
+    repo.cache_get.assert_not_awaited()
+    assert "MP3" in bot.send_message.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_shorts_go_directly_to_video_and_mp3_without_manual_format():
+    from app.bot.handlers import handle_link
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=42),
+        chat=SimpleNamespace(id=42),
+        text="https://www.youtube.com/shorts/dQw4w9WgXcQ?si=123",
+        answer=AsyncMock(),
+    )
+    repo = SimpleNamespace(
+        reserve_clip_download=AsyncMock(return_value=("pending", None)),
+        cache_get=AsyncMock(),
+    )
+    redis = AsyncMock()
+    bot = AsyncMock()
+    await handle_link(
+        message, bot, redis, repo,
+        SimpleNamespace(register=AsyncMock()), AsyncMock(), settings,
+        SimpleNamespace(search=AsyncMock()),
+    )
+    repo.reserve_clip_download.assert_awaited_once()
+    repo.cache_get.assert_not_awaited()
+    redis.xadd.assert_not_awaited()
+    assert "уже" in bot.send_message.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_full_youtube_watch_keeps_manual_format_picker():
+    from app.bot.handlers import handle_link
+
+    message = SimpleNamespace(
+        from_user=SimpleNamespace(id=42),
+        chat=SimpleNamespace(id=42),
+        text="https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        answer=AsyncMock(),
+    )
+    repo, redis, bot = AsyncMock(), AsyncMock(), AsyncMock()
+    await handle_link(
+        message, bot, redis, repo,
+        SimpleNamespace(register=AsyncMock()), AsyncMock(), settings,
+        SimpleNamespace(search=AsyncMock()),
+    )
+    redis.set.assert_awaited_once()
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.kwargs["reply_markup"]
+    repo.reserve_clip_download.assert_not_awaited()
+
+
+
+@pytest.mark.asyncio
+async def test_short_clip_job_remains_queued_if_telegram_acknowledgement_fails():
+    repo = SimpleNamespace(
+        reserve_clip_download=AsyncMock(return_value=("reserved", "clip-99")),
+        update_download=AsyncMock(),
+        cache_get=AsyncMock(),
+    )
+    bot = AsyncMock()
+    bot.send_message.side_effect = ConnectionError("Telegram connection dropped")
+    redis = AsyncMock()
+    with pytest.raises(ConnectionError):
+        await dispatch_download(
+            bot, 42, 42,
+            parse_media_url("https://www.instagram.com/reel/DgLOE34yzwp/"),
+            "clip", repo, redis, AsyncMock(), settings,
+        )
+    redis.xadd.assert_awaited_once_with(
+        "zvuk:downloads", {"job_id": "clip-99"},
+    )
+    # A failed confirmation message must not cancel an already-enqueued job.
+    repo.update_download.assert_not_awaited()

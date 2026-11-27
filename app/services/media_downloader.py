@@ -137,6 +137,49 @@ class MediaDownloader:
             duration=int(duration) if isinstance(duration, (int, float)) and duration > 0 else None,
         )
 
+    async def extract_video_sound(
+        self, video: DownloadedMedia, folder: Path,
+    ) -> DownloadedMedia | None:
+        """Convert the already-downloaded video's audio to MP3 without yt-dlp.
+
+        A silent clip legitimately has no sound track. Distinguish that case
+        from a broken FFmpeg invocation or failed conversion.
+        """
+        if not video.path.is_file():
+            raise MediaDownloadError("Исходное видео для извлечения звука не найдено.")
+        dest = folder / "short_video_sound.mp3"
+        process = await asyncio.create_subprocess_exec(
+            "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
+            "-i", str(video.path), "-map", "0:a:0", "-vn",
+            "-codec:a", "libmp3lame", "-b:a", "192k",
+            str(dest),
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            _, stderr = await asyncio.wait_for(process.communicate(), timeout=300)
+        except TimeoutError as exc:
+            process.kill()
+            await process.communicate()
+            raise MediaDownloadError("Не удалось извлечь аудио: превышено время обработки.") from exc
+        if process.returncode:
+            reason = stderr.decode(errors="replace").lower()
+            if ("matches no streams" in reason or
+                    "does not contain any stream" in reason or
+                    "stream map '0:a:0' matches no streams" in reason):
+                return None
+            log.warning("Clip audio conversion error: %s", reason[-400:])
+            raise MediaDownloadError("Видео получено, но звук не удалось извлечь.")
+        if not dest.is_file() or dest.stat().st_size == 0:
+            raise MediaDownloadError("Извлеченный звук оказался пустым.")
+        if dest.stat().st_size > self.settings.max_file_mb * 1_000_000:
+            raise MediaDownloadError("Извлеченный MP3 превышает лимит размера.")
+        return DownloadedMedia(
+            path=dest,
+            title=video.title,
+            performer=video.performer,
+            duration=video.duration,
+        )
+
     def _duration_filter(self, info: dict[str, Any], *, incomplete: bool = False) -> str | None:
         duration = info.get("duration")
         if duration and duration > self.settings.max_duration_sec:
