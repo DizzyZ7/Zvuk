@@ -4,10 +4,8 @@ This replaces Redis for search/format buttons, temporary locks, and counters.
 No separate process or Redis protocol server is required.
 """
 from datetime import datetime, timedelta, timezone
-from fnmatch import translate
-import re
 
-from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy import delete, or_, select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

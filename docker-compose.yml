@@ -12,8 +12,6 @@ x-app: &app
   depends_on:
     postgres:
       condition: service_healthy
-    redis:
-      condition: service_healthy
     telegram-bot-api:
       condition: service_started
 services:
@@ -27,16 +25,6 @@ services:
     volumes: [postgres_data:/var/lib/postgresql/data]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U zvuk -d zvuk"]
-      interval: 5s
-      timeout: 3s
-      retries: 20
-  redis:
-    image: redis:7-alpine
-    restart: unless-stopped
-    command: ["redis-server", "--appendonly", "yes"]
-    volumes: [redis_data:/data]
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
       retries: 20
@@ -71,8 +59,6 @@ services:
         condition: service_completed_successfully
       telegram-bot-api:
         condition: service_started
-      redis:
-        condition: service_healthy
   worker:
     <<: *app
     command: ["python", "-m", "app.worker"]
@@ -81,10 +67,7 @@ services:
         condition: service_completed_successfully
       telegram-bot-api:
         condition: service_started
-      redis:
-        condition: service_healthy
 volumes:
   postgres_data:
-  redis_data:
   bot_api_data:
   media_tmp:
