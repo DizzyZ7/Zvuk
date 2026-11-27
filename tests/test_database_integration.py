@@ -71,7 +71,7 @@ async def test_library_isolated_by_owner_and_deduplicated():
 
 @pytest.mark.asyncio(loop_scope="module")
 async def test_campaign_limit_and_deliveries():
-    repo = Repository(session_factory, redis=None)  # No Redis calls in campaign methods.
+    repo = Repository(session_factory)  # No Redis calls in campaign methods.
     cid = await repo.add_campaign(
         label="Integration", caption="Example",
         target_url="https://example.org", impressions_limit=2,
@@ -132,7 +132,7 @@ async def test_download_reservation_skips_success_and_active_duplicates():
     uid = 10_000_000_006
     async with session_factory.begin() as session:
         session.add(User(id=uid))
-    repo = Repository(session_factory, redis=None)
+    repo = Repository(session_factory)
     media = parse_media_url("https://youtu.be/dQw4w9WgXcQ")
     key = cache_key(media, "audio")
 
@@ -166,7 +166,7 @@ async def test_failed_download_can_be_retried():
     uid = 10_000_000_007
     async with session_factory.begin() as session:
         session.add(User(id=uid))
-    repo = Repository(session_factory, redis=None)
+    repo = Repository(session_factory)
     media = parse_media_url("https://youtu.be/abcdefghijk")
     key = cache_key(media, "audio")
     status, job = await repo.reserve_download(uid, media.url, key, "audio", 5)
@@ -185,7 +185,7 @@ async def test_five_quick_distinct_tracks_are_allowed_but_sixth_waits():
     uid = 10_000_000_008
     async with session_factory.begin() as session:
         session.add(User(id=uid))
-    repo = Repository(session_factory, redis=None)
+    repo = Repository(session_factory)
     links = [
         parse_media_url(f"https://www.youtube.com/watch?v={i:011d}")
         for i in range(6)
@@ -206,7 +206,7 @@ async def test_simultaneous_duplicate_callbacks_reserve_only_one_job():
     uid = 10_000_000_009
     async with session_factory.begin() as session:
         session.add(User(id=uid))
-    repo = Repository(session_factory, redis=None)
+    repo = Repository(session_factory)
     media = parse_media_url("https://youtu.be/abcdefghijk")
     key = cache_key(media, "audio")
     outcomes = await asyncio.gather(*[
@@ -225,7 +225,7 @@ async def test_one_users_success_does_not_block_another_users_first_file():
     other = 10_000_000_011
     async with session_factory.begin() as session:
         session.add_all([User(id=uid), User(id=other)])
-    repo = Repository(session_factory, redis=None)
+    repo = Repository(session_factory)
     media = parse_media_url("https://youtu.be/abcdefghijk")
     key = cache_key(media, "audio")
     status, job = await repo.reserve_download(uid, media.url, key, "audio", 5)
@@ -242,7 +242,7 @@ async def test_clip_one_reservation_and_two_independent_delivery_markers():
     uid = 10_000_000_012
     async with session_factory.begin() as session:
         session.add(User(id=uid))
-    repo = Repository(session_factory, redis=None)
+    repo = Repository(session_factory)
     media = parse_media_url(
         "https://www.instagram.com/reel/DgLOE34yzwp/?lqvp=tracking",
     )
@@ -285,7 +285,7 @@ async def test_existing_video_and_audio_individually_prevent_clip_redelivery():
     uid = 10_000_000_013
     async with session_factory.begin() as session:
         session.add(User(id=uid))
-    repo = Repository(session_factory, redis=None)
+    repo = Repository(session_factory)
     media = parse_media_url("https://www.youtube.com/shorts/dQw4w9WgXcQ")
     vk, ak, ck = (cache_key(media, kind)
                   for kind in ("video", "audio", "clip"))

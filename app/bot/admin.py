@@ -8,8 +8,8 @@ from aiogram.filters import Command, Filter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from redis.asyncio import Redis
-from redis.exceptions import RedisError
+from sqlalchemy.exc import SQLAlchemyError
+from app.core.state import StateStore
 
 from app.bot.keyboards import admin_keyboard, broadcast_confirmation, broadcast_stop_keyboard
 from app.core.config import Settings
@@ -38,7 +38,7 @@ class AdminState(StatesGroup):
 
 @router.message(Command("health"))
 async def check_health_command(
-    message: Message, bot: Bot, redis: Redis, repo: Repository,
+    message: Message, bot: Bot, redis: StateStore, repo: Repository,
 ) -> None:
     report = await health_status(bot, redis, repo)
     await message.answer(report.display())
@@ -46,7 +46,7 @@ async def check_health_command(
 
 @router.callback_query(F.data == "adm:health")
 async def check_health_button(
-    callback: CallbackQuery, bot: Bot, redis: Redis, repo: Repository,
+    callback: CallbackQuery, bot: Bot, redis: StateStore, repo: Repository,
 ) -> None:
     report = await health_status(bot, redis, repo)
     if isinstance(callback.message, Message):
@@ -78,12 +78,12 @@ async def show_stats(callback: CallbackQuery, repo: Repository) -> None:
     try:
         queued_downloads, queued_broadcasts = await repo.queue_depths()
         queues = f"{queued_downloads} загрузок / {queued_broadcasts} рассылок"
-    except RedisError:
+    except SQLAlchemyError:
         queues = "данные временно недоступны"
     if isinstance(callback.message, Message):
         await callback.message.answer(
             f"📊 Пользователи: {total}\nЗа 24 часа: {active}\n"
-            f"Успешных скачиваний: {downloads}\nОтдано из кэша: {cached}\n"
+            f"Уникальных выдач: {downloads}\nИз кэша (история до 30 дней): {cached}\n"
             f"В очереди: {queues}\n"
             f"Premium активен: {premium_active}\n"
             f"Платежей Stars: {paid_count}\n"
@@ -235,7 +235,7 @@ async def abandon_broadcast(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(AdminState.confirm_broadcast, F.data == "adm:bc:send")
 async def launch_broadcast(
-    callback: CallbackQuery, state: FSMContext, repo: Repository, redis: Redis,
+    callback: CallbackQuery, state: FSMContext, repo: Repository, redis: StateStore,
 ) -> None:
     if not isinstance(callback.message, Message):
         await callback.answer("Сообщение недоступно.", show_alert=True)

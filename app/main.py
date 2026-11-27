@@ -4,12 +4,12 @@ import logging
 from aiogram import Dispatcher
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import BotCommand
-from aiogram.fsm.storage.redis import RedisStorage
+from app.core.fsm import PostgresFSMStorage
 from app.bot import admin, campaigns, economics, handlers, legal, library, menu, playlists, premium, recognition
 from app.bot.middlewares import SponsorMiddleware, ThrottleMiddleware
 from app.core.config import settings
 from app.core.database import engine, session_factory
-from app.core.redis import make_redis
+from app.core.state import StateStore
 from app.core.telegram import make_bot
 from app.services.ad_manager import AdManager
 from app.services.library import TrackLibrary
@@ -23,9 +23,9 @@ from app.services.user_service import UserService
 async def main() -> None:
     logging.basicConfig(level=settings.log_level.upper(),
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    redis = make_redis()
-    storage = RedisStorage(redis=redis)
-    repo = Repository(session_factory, redis)
+    state = StateStore(session_factory)
+    storage = PostgresFSMStorage(state)
+    repo = Repository(session_factory, state)
     bot = make_bot()
     dp = Dispatcher(storage=storage)
     dp.include_router(admin.router)
@@ -44,7 +44,7 @@ async def main() -> None:
     dp.message.middleware(SponsorMiddleware())
     dp.callback_query.middleware(SponsorMiddleware())
     try:
-        await redis.ping()
+        await state.ping()
         await bot.delete_webhook(drop_pending_updates=False)
         try:
             await bot.set_my_commands([
@@ -60,7 +60,7 @@ async def main() -> None:
         except TelegramAPIError:
             logging.getLogger(__name__).warning("Cannot update Telegram command menu")
         await dp.start_polling(
-            bot, settings=settings, redis=redis, repo=repo,
+            bot, settings=settings, redis=state, repo=repo,
             ads=AdManager(repo), users=UserService(repo), music_search=MusicSearch(),
             library=TrackLibrary(session_factory),
             playlists=PlaylistService(session_factory),

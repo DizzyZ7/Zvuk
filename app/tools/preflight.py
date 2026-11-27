@@ -79,7 +79,6 @@ def main() -> int:
 
     services = [
         ("PostgreSQL", os.getenv("DATABASE_URL", ""), 5432),
-        ("Redis", os.getenv("REDIS_URL", ""), 6379),
         ("Local Bot API", os.getenv("BOT_API_URL", ""), 8081),
     ]
     failed_connections = []

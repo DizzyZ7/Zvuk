@@ -2,15 +2,14 @@
 import asyncio
 import logging
 import tempfile
-from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramAPIError
 from aiogram.types import Message
-from redis.asyncio import Redis
-from redis.exceptions import RedisError
+from sqlalchemy.exc import SQLAlchemyError
+from app.core.state import StateStore
 
 from app.bot.keyboards import search_keyboard
 from app.bot.handlers import _search_download_states
@@ -28,33 +27,12 @@ log = logging.getLogger(__name__)
 router = Router(name="recognition")
 recognition_slots = asyncio.Semaphore(2)
 
-# The two counters must be checked and incremented in one Lua script. This
-# prevents races between instances and avoids paid API requests after the cap.
-QUOTA_SCRIPT = """
-local daily = tonumber(redis.call('GET', KEYS[1]) or '0')
-local monthly = tonumber(redis.call('GET', KEYS[2]) or '0')
-if daily >= tonumber(ARGV[1]) then return 1 end
-if monthly >= tonumber(ARGV[2]) then return 2 end
-if redis.call('INCR', KEYS[1]) == 1 then
-  redis.call('EXPIRE', KEYS[1], 86400)
-end
-if redis.call('INCR', KEYS[2]) == 1 then
-  redis.call('EXPIRE', KEYS[2], 3456000)
-end
-return 0
-"""
-
-
 async def reserve_recognition(
-    redis: Redis, user_id: int, *, daily_limit: int, monthly_cap: int,
+    redis: StateStore, user_id: int, *, daily_limit: int, monthly_cap: int,
 ) -> int:
-    month = datetime.now(timezone.utc).strftime("%Y-%m")
-    return int(await redis.eval(
-        QUOTA_SCRIPT, 2,
-        f"recognition:daily:{user_id}",
-        f"recognition:month:{month}",
-        daily_limit, monthly_cap,
-    ))
+    return await redis.reserve_recognition(
+        user_id, daily_limit=daily_limit, monthly_cap=monthly_cap,
+    )
 
 
 async def recognize_file(
@@ -76,7 +54,7 @@ async def recognize_file(
     F.chat.type == "private", F.voice | F.audio | F.video | F.video_note,
 )
 async def recognize_message(
-    message: Message, bot: Bot, redis: Redis, settings: Settings,
+    message: Message, bot: Bot, redis: StateStore, settings: Settings,
     users: UserService, premium: PremiumService, music_search: MusicSearch,
     repo: Repository,
 ) -> None:
@@ -100,7 +78,7 @@ async def recognize_message(
     token = uuid4().hex
     try:
         acquired = await redis.set(lock_key, token, nx=True, ex=180)
-    except RedisError:
+    except SQLAlchemyError:
         await message.answer("Распознавание временно недоступно. Попробуйте позже.")
         return
     if not acquired:
@@ -168,11 +146,11 @@ async def recognize_message(
             render_search(matches, f"{result.artist} — {result.title}", states=states),
             reply_markup=search_keyboard(search_token, matches, states=states),
         )
-    except RedisError:
-        log.exception("Redis quota/lock service unavailable for recognition")
+    except SQLAlchemyError:
+        log.exception("PostgreSQL quota/lock service unavailable for recognition")
         await message.answer("Распознавание временно недоступно. Попробуйте позже.")
     finally:
         try:
             await release_lock(redis, lock_key, token)
-        except RedisError:
+        except SQLAlchemyError:
             log.exception("Could not release recognition lock for user=%s", user_id)

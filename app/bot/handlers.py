@@ -6,15 +6,13 @@ from aiogram import Bot, F, Router
 from aiogram.filters import CommandStart
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message
-from redis.asyncio import Redis
+from app.core.state import StateStore
 
 from app.bot.keyboards import format_keyboard, search_keyboard, subscribe_keyboard
 from app.bot.middlewares import subscription_missing
 from app.core.config import Settings
 from app.services.ad_manager import AdManager
-from app.services.media_downloader import AUDIO_KINDS
 from app.services.music_search import MusicSearch, MusicSearchError
-from app.services.queue import enqueue_download
 from app.services.search_sessions import (
     PAGE_SIZE, SearchSessionError, create_search, read_search,
 )
@@ -46,14 +44,10 @@ async def start(message: Message, users: UserService) -> None:
 
 async def dispatch_download(
     bot: Bot, chat_id: int, user_id: int, media: MediaURL, kind: str,
-    repo: Repository, redis: Redis, ads: AdManager, settings: Settings,
+    repo: Repository, redis: StateStore, ads: AdManager, settings: Settings,
     *, notify_rejection: bool = True,
 ) -> str:
-    """Reserve a download in PostgreSQL before touching Redis or YouTube.
-
-    A completed or in-progress file is always rejected for the same user and
-    output format. First-time requests may reuse a global cached Telegram file.
-    """
+    """Durably reserve one output before the worker handles media or cached files."""
     owner_id = user_id if settings.ytdlp_cookies and user_id in settings.admin_ids else None
     key = cache_key(media, kind, owner_id=owner_id)
     if kind == "clip":
@@ -72,40 +66,9 @@ async def dispatch_download(
             await bot.send_message(chat_id, download_status_message(status, settings))
         return status
     assert job_id is not None
-    try:
-        if kind != "clip":
-            # Clip jobs have two output file IDs and are handled by the worker.
-            cached = await repo.cache_get(key)
-            if cached:
-                placement = await ads.placement(user_id)
-                try:
-                    if kind in AUDIO_KINDS:
-                        await bot.send_audio(
-                            chat_id, audio=cached, caption=placement.caption,
-                        )
-                    else:
-                        await bot.send_video(
-                            chat_id, video=cached, caption=placement.caption,
-                        )
-                except TelegramBadRequest as exc:
-                    if ("wrong file" in str(exc).lower()
-                            or "invalid file" in str(exc).lower()):
-                        await repo.cache_drop(key)
-                    else:
-                        raise
-                else:
-                    await repo.update_download(job_id, "success", cache_hit=True)
-                    await ads.delivered(placement)
-                    return "cached"
-        await enqueue_download(redis, job_id)
-    except Exception:
-        # The reservation must never become an orphaned queued row.
-        log.exception("Failed to dispatch reserved download %s", job_id)
-        await repo.update_download(
-            job_id, "failed", "Не удалось подготовить загрузку",
-        )
-        raise
-    # User-facing acknowledgements must not invalidate an already queued job.
+    # The transaction creating the durable job also issued pg_notify().
+    # The worker is the ONLY sender, including Telegram file_id cache hits.
+    # Do not race it by attempting a second delivery from the bot process.
     await bot.send_message(
         chat_id,
         ("🎬 Ссылка принята. Пришлю видео и следом MP3 со звуком из него."
@@ -129,7 +92,7 @@ def download_status_message(status: str, settings: Settings) -> str:
 
 @router.message(F.chat.type == "private", F.text)
 async def handle_link(
-    message: Message, bot: Bot, redis: Redis, repo: Repository,
+    message: Message, bot: Bot, redis: StateStore, repo: Repository,
     users: UserService, ads: AdManager, settings: Settings,
     music_search: MusicSearch,
 ) -> None:
@@ -189,7 +152,7 @@ async def handle_link(
 
 @router.callback_query(F.data.startswith("fmt:"))
 async def select_format(
-    callback: CallbackQuery, bot: Bot, redis: Redis, repo: Repository,
+    callback: CallbackQuery, bot: Bot, redis: StateStore, repo: Repository,
     users: UserService, ads: AdManager, settings: Settings,
 ) -> None:
     if not callback.from_user or not isinstance(callback.message, Message):
@@ -240,7 +203,7 @@ async def _search_download_states(
 
 
 async def _search_callback_context(
-    callback: CallbackQuery, redis: Redis, token: str,
+    callback: CallbackQuery, redis: StateStore, token: str,
 ):
     if not callback.from_user or not isinstance(callback.message, Message):
         await callback.answer("Сообщение недоступно.", show_alert=True)
@@ -271,7 +234,7 @@ async def _refresh_search(
 
 @router.callback_query(F.data.startswith("find:"))
 async def select_search_result(
-    callback: CallbackQuery, bot: Bot, redis: Redis, repo: Repository,
+    callback: CallbackQuery, bot: Bot, redis: StateStore, repo: Repository,
     users: UserService, ads: AdManager, settings: Settings,
 ) -> None:
     parts = (callback.data or "").split(":")
@@ -310,7 +273,7 @@ async def select_search_result(
 
 @router.callback_query(F.data.startswith("searchpage:"))
 async def browse_search_page(
-    callback: CallbackQuery, redis: Redis, repo: Repository, settings: Settings,
+    callback: CallbackQuery, redis: StateStore, repo: Repository, settings: Settings,
 ) -> None:
     parts = (callback.data or "").split(":")
     if len(parts) != 3 or not parts[2].isdigit():

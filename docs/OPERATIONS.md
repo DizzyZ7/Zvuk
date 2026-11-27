@@ -27,7 +27,7 @@ docker compose logs --tail=100 bot worker migrate telegram-bot-api
 ## Проверка E2E
 
 1. `/start` отвечает в личных сообщениях.
-2. YouTube: видео -> выбор MP3 -> скачивание и `file_id` в Redis/БД.
+2. YouTube: видео -> выбор MP3 -> скачивание и `file_id` в PostgreSQL.
 3. Отправьте ту же ссылку: должен использоваться уже сохраненный `file_id`.
 4. Выберите ⚡1.25×, затем 🌙0.80× по той же ссылке: проверьте скорость, длительность и разные ключи кэша.
 4. Тот же URL -> MP4: отдельная запись кэша и загрузка видео.
@@ -44,20 +44,19 @@ docker compose logs --tail=100 bot worker migrate telegram-bot-api
 
 ```sh
 docker compose logs -f --tail=100 bot worker
-docker compose exec redis redis-cli XINFO GROUPS zvuk:downloads
-docker compose exec redis redis-cli XINFO GROUPS zvuk:broadcasts
-docker compose exec redis redis-cli XPENDING zvuk:downloads workers
-docker compose exec redis redis-cli XLEN zvuk:downloads
+docker compose exec postgres psql -U zvuk -d zvuk -c "SELECT status, COUNT(*) FROM download_history GROUP BY status"
+docker compose exec postgres psql -U zvuk -d zvuk -c "SELECT status, COUNT(*) FROM broadcasts GROUP BY status"
+docker compose exec postgres psql -U zvuk -d zvuk -c "SELECT COUNT(*) FROM delivery_receipts"
 docker compose exec postgres pg_isready -U zvuk -d zvuk
 ```
 
-Контролируйте backlog, возраст pending-событий, дисковое место Docker volume, латентность загрузок, рост `download_history` и количество транскодирований. Redis append-only включен. Сохраняйте резервные копии PostgreSQL.
+Контролируйте число задач со статусом queued/processing, срок SQL-аренд, место на диске, латентность загрузок и транскодирования. Подробная история старше 30 дней удаляется, но delivery_receipts сохраняются. Регулярно делайте резервные копии PostgreSQL.
 
 ## Сценарии сбоев
 
 - **Telegram ограничивает запросы**: повторно используйте `file_id`, уменьшите параллелизм и дождитесь RetryAfter.
-- **Redis/БД кратковременно недоступны**: задача остается в pending stream для последующего восстановления, но после лимита попыток может завершиться ошибкой.
-- **Worker аварийно завершился**: новые экземпляры возвращают незавершенные задачи через XAUTOCLAIM спустя примерно 3 минуты. Возможна повторная отправка файла в узком окне между API отправкой и фиксацией статуса.
+- **PostgreSQL кратковременно недоступна**: задания сохраняются в БД и будут повторно обработаны после восстановления соединения; после исчерпания лимита попыток могут завершиться ошибкой.
+- **Worker аварийно завершился**: новые экземпляры возвращают незавершенные задачи после истечения SQL-аренды, с контрольной проверкой примерно раз в 10 минут. Возможна повторная отправка файла в узком окне между API отправкой и фиксацией статуса.
 - **Бот не видит подписчиков канала**: убедитесь, что у него права администратора и правильный chat_id.
 - **Файлы занимают диск**: TemporaryDirectory удаляется в нормальном режиме и при обрабатываемых ошибках; после SIGKILL/аварии могут остаться директории `/shared/zvuk_*`. Удаляйте их только после остановки воркера, убедившись, что загрузка не выполняется.
 - **Долго идет рассылка**: остановите через inline-кнопку; уже отправленные копии остаются. Новых подписчиков, зарегистрировавшихся после запуска рассылки, воркер не добавляет.
@@ -67,5 +66,5 @@ docker compose exec postgres pg_isready -U zvuk -d zvuk
 1. Не включайте `PREMIUM_ENABLED`, пока не указан `SUPPORT_USERNAME` и не проверены счета Stars, получение `pre_checkout_query`, `successful_payment` и повторная доставка событий.
 2. Все платежи сохраняют идентификаторы списаний и сумму Stars в PostgreSQL. Для возвратов используйте официальный `refundStarPayment` с учетом текущей бизнес-логики; автоматическая команда возвратов в Zvuk пока отсутствует.
 3. Для платной рекламы используйте `/campaign_add`, `/campaigns`, `/campaign_on`, `/campaign_off`. Платежи от рекламодателей и документы ведутся вручную.
-4. При включении AudD контролируйте `RECOGNITION_MONTHLY_CAP` и тариф на стороне AudD, не полагаясь только на Redis.
+4. При включении AudD контролируйте `RECOGNITION_MONTHLY_CAP` и тариф на стороне AudD, не полагаясь только на внутренний счетчик PostgreSQL.
 5. До запуска зарегистрируйте контакт для запросов пользователей по `/privacy`, `/terms`, платежам и удалению данных.

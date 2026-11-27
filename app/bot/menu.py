@@ -2,7 +2,7 @@
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
-from redis.asyncio import Redis
+from app.core.state import StateStore
 
 from app.bot.keyboards import library_keyboard, search_keyboard
 from app.bot.playlists import playlist_keyboard
@@ -112,7 +112,7 @@ async def handle_menu(
 
 @router.message(Command("fragment"), F.chat.type == "private")
 async def fragment_search(
-    message: Message, redis: Redis, music_search: MusicSearch,
+    message: Message, redis: StateStore, music_search: MusicSearch,
     repo: Repository, settings: Settings,
 ) -> None:
     if not message.from_user:

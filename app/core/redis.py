@@ -1,5 +1,7 @@
-from redis.asyncio import Redis
-from app.core.config import settings
+"""Legacy module: PostgreSQL is now the only persistence service.
 
-def make_redis() -> Redis:
-    return Redis.from_url(settings.redis_url, decode_responses=True, health_check_interval=30)
+No Redis client is needed. Existing integrations should import StateStore.
+"""
+from app.core.state import StateStore
+
+__all__ = ["StateStore"]

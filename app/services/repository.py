@@ -1,18 +1,17 @@
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
-from redis.asyncio import Redis
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
-from app.models import (AdCampaign, AdPost, Broadcast, DownloadHistory, MediaCache,
+from app.models import (AdCampaign, AdPost, Broadcast, DeliveryReceipt, DownloadHistory, MediaCache,
                         PremiumGrant, PremiumPayment, SponsorChannel, User)
-from app.services.queue import BROADCAST_STREAM, DOWNLOAD_STREAM
+from app.core.state import StateStore
 
 class Repository:
-    def __init__(self, factory: async_sessionmaker[AsyncSession], redis: Redis):
+    def __init__(self, factory: async_sessionmaker[AsyncSession], state: StateStore | None = None):
         self.factory = factory
-        self.redis = redis
+        self.state = state or StateStore(factory)
 
     async def touch_user(self, user_id: int, username: str | None) -> None:
         async with self.factory.begin() as session:
@@ -24,15 +23,9 @@ class Repository:
             await session.execute(stmt)
 
     async def cache_get(self, key: str) -> str | None:
-        value = await self.redis.get(f"media:{key}")
-        if value:
-            return value
         async with self.factory() as session:
             item = await session.get(MediaCache, key)
-            if item:
-                await self.redis.set(f"media:{key}", item.file_id, ex=604800)
-                return item.file_id
-        return None
+            return item.file_id if item else None
 
     async def cache_put(self, key: str, file_id: str, kind: str) -> None:
         async with self.factory.begin() as session:
@@ -42,20 +35,35 @@ class Repository:
                 set_={"file_id": file_id, "media_type": kind, "created_at": func.now()},
             )
             await session.execute(stmt)
-        await self.redis.set(f"media:{key}", file_id, ex=604800)
 
     async def cache_drop(self, key: str) -> None:
         async with self.factory.begin() as session:
-            item = await session.get(MediaCache, key)
-            if item:
-                await session.delete(item)
-        await self.redis.delete(f"media:{key}")
+            await session.execute(delete(MediaCache).where(MediaCache.key == key))
+
+    @staticmethod
+    async def _notify(session: AsyncSession, event: str) -> None:
+        # Commit delivers this notification *after* the durable row exists.
+        await session.execute(
+            text("SELECT pg_notify('zvuk_jobs', :event)"), {"event": event},
+        )
+
+    @staticmethod
+    async def _receipt(session: AsyncSession, user_id: int, key: str) -> None:
+        await session.execute(
+            insert(DeliveryReceipt).values(
+                user_id=user_id, cache_key=key,
+            ).on_conflict_do_nothing(
+                index_elements=[DeliveryReceipt.user_id, DeliveryReceipt.cache_key],
+            )
+        )
 
     async def new_download(self, user_id: int, url: str, key: str, kind: str) -> str:
         job_id = uuid4().hex
         async with self.factory.begin() as session:
             session.add(DownloadHistory(id=job_id, user_id=user_id, url=url,
                                         cache_key=key, kind=kind, status="queued"))
+            await session.flush()
+            await self._notify(session, "download")
         return job_id
 
     async def record_delivered_output(
@@ -69,6 +77,7 @@ class Repository:
                 cache_key=key, kind=kind, status="success",
                 cache_hit=cache_hit, finished_at=datetime.now(timezone.utc),
             ))
+            await self._receipt(session, user_id, key)
 
     async def reserve_clip_download(
         self, user_id: int, url: str, key: str,
@@ -85,7 +94,13 @@ class Repository:
                     DownloadHistory.status.in_(("success", "queued", "processing")),
                 )
             )).all()
-            states: dict[str, set[str]] = {}
+            delivered = (await session.scalars(
+                select(DeliveryReceipt.cache_key).where(
+                    DeliveryReceipt.user_id == user_id,
+                    DeliveryReceipt.cache_key.in_([key, video_key, audio_key]),
+                )
+            )).all()
+            states: dict[str, set[str]] = {key: {"success"} for key in delivered}
             for k, state in rows:
                 states.setdefault(k, set()).add(state)
             if "success" in states.get(key, set()) or all(
@@ -108,6 +123,8 @@ class Repository:
                 id=job_id, user_id=user_id, url=url,
                 cache_key=key, kind="clip", status="queued",
             ))
+            await session.flush()
+            await self._notify(session, "download")
             return "reserved", job_id
 
     async def reserve_download(
@@ -128,7 +145,9 @@ class Repository:
                     DownloadHistory.status.in_(("success", "queued", "processing")),
                 ),
             )).all()
-            if "success" in rows:
+            if "success" in rows or await session.get(
+                DeliveryReceipt, (user_id, key),
+            ) is not None:
                 return "downloaded", None
             if "queued" in rows or "processing" in rows:
                 return "pending", None
@@ -145,6 +164,8 @@ class Repository:
                 id=job_id, user_id=user_id, url=url, cache_key=key,
                 kind=kind, status="queued",
             ))
+            await session.flush()
+            await self._notify(session, "download")
             return "reserved", job_id
 
     async def download_states(self, user_id: int, keys: list[str]) -> dict[str, str]:
@@ -162,7 +183,14 @@ class Repository:
                     DownloadHistory.status.in_(tuple(priority)),
                 ),
             )).all()
-        result: dict[str, str] = {}
+        async with self.factory() as session:
+            receipts = (await session.scalars(
+                select(DeliveryReceipt.cache_key).where(
+                    DeliveryReceipt.user_id == user_id,
+                    DeliveryReceipt.cache_key.in_(keys),
+                ),
+            )).all()
+        result: dict[str, str] = {key: "success" for key in receipts}
         for key, status in rows:
             if priority[status] > priority.get(result.get(key, ""), 0):
                 result[key] = status
@@ -189,10 +217,23 @@ class Repository:
                   "cache_hit": cache_hit}
         if status in ("success", "failed"):
             values["finished_at"] = datetime.now(timezone.utc)
+            values["lease_until"] = None
         async with self.factory.begin() as session:
-            await session.execute(
-                update(DownloadHistory).where(DownloadHistory.id == job_id).values(**values)
+            row = await session.scalar(
+                select(DownloadHistory).where(
+                    DownloadHistory.id == job_id,
+                ).with_for_update()
             )
+            if row is None:
+                return
+            if status in ("success", "failed") and row.status == "success":
+                return
+            await session.execute(
+                update(DownloadHistory).where(DownloadHistory.id == job_id)
+                .values(**values)
+            )
+            if status == "success":
+                await self._receipt(session, row.user_id, row.cache_key)
 
     async def record_download_retry(self, job_id: str) -> int:
         async with self.factory.begin() as session:
@@ -230,23 +271,18 @@ class Repository:
                 await session.delete(row)
 
     async def ad_text(self) -> str:
-        cached = await self.redis.get("active_ad")
-        if cached is not None:
-            return cached
         async with self.factory() as session:
             ad = await session.get(AdPost, 1)
-            text = ad.text if ad and ad.enabled else ""
-        await self.redis.set("active_ad", text, ex=60)
-        return text
+            return ad.text if ad and ad.enabled else ""
 
-    async def set_ad(self, text: str) -> None:
+    async def set_ad(self, value: str) -> None:
         async with self.factory.begin() as session:
-            stmt = insert(AdPost).values(id=1, text=text, enabled=bool(text))
+            stmt = insert(AdPost).values(id=1, text=value, enabled=bool(value))
             stmt = stmt.on_conflict_do_update(
-                index_elements=[AdPost.id], set_={"text": text, "enabled": bool(text)},
+                index_elements=[AdPost.id],
+                set_={"text": value, "enabled": bool(value)},
             )
             await session.execute(stmt)
-        await self.redis.delete("active_ad")
 
     async def add_campaign(
         self, *, label: str, caption: str, target_url: str,
@@ -306,10 +342,18 @@ class Repository:
             return result.scalar_one_or_none() is not None
 
     async def queue_depths(self) -> tuple[int, int]:
-        """Approximate active and queued events; ACKed events are deleted from streams."""
-        downloads = await self.redis.xlen(DOWNLOAD_STREAM)
-        broadcasts = await self.redis.xlen(BROADCAST_STREAM)
-        return int(downloads), int(broadcasts)
+        async with self.factory() as session:
+            downloads = await session.scalar(
+                select(func.count()).select_from(DownloadHistory).where(
+                    DownloadHistory.status.in_(("queued", "processing")),
+                ),
+            )
+            broadcasts = await session.scalar(
+                select(func.count()).select_from(Broadcast).where(
+                    Broadcast.status.in_(("queued", "running")),
+                ),
+            )
+            return int(downloads or 0), int(broadcasts or 0)
 
     async def premium_stats(self) -> tuple[int, int, int]:
         """Active subscriptions, completed payments and gross Stars (not fiat revenue)."""
@@ -336,8 +380,9 @@ class Repository:
             active = await session.scalar(
                 select(func.count()).select_from(User).where(User.last_seen >= since)
             )
-            downloads = await session.scalar(select(func.count()).select_from(DownloadHistory)
-                                             .where(DownloadHistory.status == "success"))
+            downloads = await session.scalar(
+                select(func.count()).select_from(DeliveryReceipt)
+            )
             cached = await session.scalar(select(func.count()).select_from(DownloadHistory)
                                           .where(DownloadHistory.cache_hit.is_(True)))
         return int(users or 0), int(active or 0), int(downloads or 0), int(cached or 0)
@@ -353,6 +398,8 @@ class Repository:
                                   source_message_id=source_message_id,
                                   progress_message_id=progress_message_id,
                                   total=total, status="queued"))
+            await session.flush()
+            await self._notify(session, "broadcast")
         return job_id
 
     async def broadcast_active(self) -> bool:
@@ -386,6 +433,73 @@ class Repository:
                 .where(Broadcast.id == job_id, Broadcast.status.not_in_(("cancelled", "failed")))
                 .values(processed=processed, failed=failed, last_user_id=last_user_id, status=status)
             )
+
+    async def claim_next_job(self, event: str) -> str | None:
+        """FOR UPDATE SKIP LOCKED: no two workers can claim one job."""
+        now = datetime.now(timezone.utc)
+        lease_until = now + timedelta(minutes=8)
+        async with self.factory.begin() as session:
+            if event == "download":
+                row = await session.scalar(
+                    select(DownloadHistory)
+                    .where(or_(
+                        DownloadHistory.status == "queued",
+                        and_(
+                            DownloadHistory.status == "processing",
+                            or_(DownloadHistory.lease_until.is_(None),
+                                DownloadHistory.lease_until < now),
+                        ),
+                    ))
+                    .order_by(DownloadHistory.created_at, DownloadHistory.id)
+                    .limit(1).with_for_update(skip_locked=True)
+                )
+                if row:
+                    row.status = "processing"
+                    row.lease_until = lease_until
+            elif event == "broadcast":
+                row = await session.scalar(
+                    select(Broadcast)
+                    .where(or_(
+                        Broadcast.status == "queued",
+                        and_(
+                            Broadcast.status == "running",
+                            or_(Broadcast.lease_until.is_(None),
+                                Broadcast.lease_until < now),
+                        ),
+                    ))
+                    .order_by(Broadcast.created_at, Broadcast.id)
+                    .limit(1).with_for_update(skip_locked=True)
+                )
+                if row:
+                    row.status = "running"
+                    row.lease_until = lease_until
+            else:
+                raise ValueError("Unknown queue")
+            return row.id if row else None
+
+    async def renew_job_lease(self, event: str, job_id: str) -> None:
+        now = datetime.now(timezone.utc)
+        async with self.factory.begin() as session:
+            if event == "download":
+                await session.execute(update(DownloadHistory).where(
+                    DownloadHistory.id == job_id,
+                    DownloadHistory.status == "processing",
+                ).values(lease_until=now + timedelta(minutes=8)))
+            elif event == "broadcast":
+                await session.execute(update(Broadcast).where(
+                    Broadcast.id == job_id,
+                    Broadcast.status == "running",
+                ).values(lease_until=now + timedelta(minutes=8)))
+
+    async def cleanup_history(self, *, older_than_days: int = 30) -> int:
+        """Keep tiny delivery receipts; purge verbose terminal job logs."""
+        before = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+        async with self.factory.begin() as session:
+            count = (await session.execute(delete(DownloadHistory).where(
+                DownloadHistory.status.in_(("success", "failed")),
+                DownloadHistory.finished_at < before,
+            ))).rowcount
+            return int(count)
 
     async def users_after(
         self, after: int, limit: int = 100, *, created_before: datetime | None = None,

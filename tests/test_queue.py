@@ -1,37 +1,34 @@
-import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
 
 from app.services.queue import (
-    BROADCAST_STREAM, DOWNLOAD_STREAM, GROUP, acknowledge, keep_pending_alive,
+    BROADCAST_STREAM, CHANNEL, DOWNLOAD_STREAM, asyncpg_dsn,
+    enqueue_broadcast, enqueue_download, release_lock,
 )
 
 
 @pytest.mark.asyncio
-async def test_acknowledge_removes_processed_event():
-    redis = AsyncMock()
-    redis.xack.return_value = 1
-    await acknowledge(redis, DOWNLOAD_STREAM, "123-0")
-    redis.xack.assert_awaited_once_with(DOWNLOAD_STREAM, GROUP, "123-0")
-    redis.xdel.assert_awaited_once_with(DOWNLOAD_STREAM, "123-0")
+async def test_legacy_enqueue_is_noop_after_transactional_sql_notify():
+    state = AsyncMock()
+    await enqueue_download(state, "job-id")
+    await enqueue_broadcast(state, "broadcast-id")
+    state.assert_not_awaited()
+    assert DOWNLOAD_STREAM == "download"
+    assert BROADCAST_STREAM == "broadcast"
+    assert CHANNEL == "zvuk_jobs"
 
 
 @pytest.mark.asyncio
-async def test_acknowledge_does_not_delete_unacknowledged_event():
-    redis = AsyncMock()
-    redis.xack.return_value = 0
-    await acknowledge(redis, BROADCAST_STREAM, "123-0")
-    redis.xdel.assert_not_awaited()
+async def test_release_lock_is_token_guarded_by_postgres():
+    state = AsyncMock()
+    await release_lock(state, "media-lock:abc", "owned")
+    state.release_lock.assert_awaited_once_with("media-lock:abc", "owned")
 
 
-@pytest.mark.asyncio
-async def test_keep_pending_alive_cancels_heartbeat_on_exit():
-    redis = AsyncMock()
-    async with keep_pending_alive(redis, DOWNLOAD_STREAM, "c1", "123-0"):
-        await asyncio.sleep(0)
-    # No pending background tasks survive the context manager.
-    assert not any(
-        t.get_name() == "stream-heartbeat:123-0" and not t.done()
-        for t in asyncio.all_tasks()
-    )
+def test_asyncpg_dsn_has_native_scheme():
+    from unittest.mock import patch
+
+    with patch("app.services.queue.settings") as settings:
+        settings.database_url = "postgresql+asyncpg://test:pwd@localhost:5432/zvuk"
+        assert asyncpg_dsn() == "postgresql://test:pwd@localhost:5432/zvuk"

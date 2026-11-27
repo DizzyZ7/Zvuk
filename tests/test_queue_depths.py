@@ -2,16 +2,24 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.services.queue import BROADCAST_STREAM, DOWNLOAD_STREAM
 from app.services.repository import Repository
 
 
+class FakeSession:
+    def __init__(self):
+        self.scalar = AsyncMock(side_effect=[2, 1])
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
 @pytest.mark.asyncio
-async def test_queue_depths():
+async def test_queue_depths_uses_postgres_counts():
+    session = FakeSession()
     repo = Repository.__new__(Repository)
-    repo.redis = AsyncMock()
-    repo.redis.xlen.side_effect = [2, 1]
+    repo.factory = lambda: session
     assert await repo.queue_depths() == (2, 1)
-    assert [call.args[0] for call in repo.redis.xlen.await_args_list] == [
-        DOWNLOAD_STREAM, BROADCAST_STREAM
-    ]
+    assert session.scalar.await_count == 2
