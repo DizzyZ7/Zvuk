@@ -27,7 +27,7 @@ def make_worker(cache_ids=None, statuses=None):
         record_delivered_output=AsyncMock(),
         update_download=AsyncMock(),
     )
-    redis = SimpleNamespace(set=AsyncMock(return_value=True), eval=AsyncMock(return_value=1))
+    redis = SimpleNamespace(set=AsyncMock(return_value=True), release_lock=AsyncMock())
     bot = SimpleNamespace(send_message=AsyncMock())
     worker = Worker(bot, redis, repo)
     worker.send_media = AsyncMock(side_effect=["tg-video-id", "tg-audio-id"])
