@@ -1,5 +1,6 @@
 """No internet calls: exercise the single-download dual-output contract."""
 import tempfile
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -27,7 +28,11 @@ def make_worker(cache_ids=None, statuses=None):
         record_delivered_output=AsyncMock(),
         update_download=AsyncMock(),
     )
-    redis = SimpleNamespace(set=AsyncMock(return_value=True), release_lock=AsyncMock())
+    @asynccontextmanager
+    async def unlocked(_key):
+        yield
+
+    redis = SimpleNamespace(media_lock=unlocked)
     bot = SimpleNamespace(send_message=AsyncMock())
     worker = Worker(bot, redis, repo)
     worker.send_media = AsyncMock(side_effect=["tg-video-id", "tg-audio-id"])

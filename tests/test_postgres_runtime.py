@@ -148,3 +148,36 @@ async def test_fsm_persists_state_and_data_across_storage_instances():
     await s2.set_data(key, {})
     assert await s1.get_state(key) is None
     assert await s1.get_data(key) == {}
+
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_postgres_advisory_media_lock_serializes_and_auto_releases():
+    """Concurrent uploads wait for the same media lock, then reuse the cache."""
+    store = StateStore(session_factory)
+    lock = "media-lock:integration:" + uuid4().hex
+    first_acquired = asyncio.Event()
+    release_first = asyncio.Event()
+    second_acquired = asyncio.Event()
+
+    async def first():
+        async with store.media_lock(lock):
+            first_acquired.set()
+            await release_first.wait()
+
+    async def second():
+        await first_acquired.wait()
+        async with store.media_lock(lock):
+            second_acquired.set()
+
+    t1 = asyncio.create_task(first())
+    t2 = asyncio.create_task(second())
+    try:
+        await asyncio.wait_for(first_acquired.wait(), 3)
+        await asyncio.sleep(0.1)
+        assert not second_acquired.is_set()
+        release_first.set()
+        await asyncio.wait_for(second_acquired.wait(), 3)
+    finally:
+        release_first.set()
+        await asyncio.gather(t1, t2)
