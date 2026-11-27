@@ -83,7 +83,7 @@ async def show_stats(callback: CallbackQuery, repo: Repository) -> None:
     if isinstance(callback.message, Message):
         await callback.message.answer(
             f"📊 Пользователи: {total}\nЗа 24 часа: {active}\n"
-            f"Успешных скачиваний: {downloads}\nОтдано из кэша: {cached}\n"
+            f"Уникальных выдач: {downloads}\nИз кэша (история до 30 дней): {cached}\n"
             f"В очереди: {queues}\n"
             f"Premium активен: {premium_active}\n"
             f"Платежей Stars: {paid_count}\n"

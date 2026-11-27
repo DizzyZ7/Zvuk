@@ -380,8 +380,9 @@ class Repository:
             active = await session.scalar(
                 select(func.count()).select_from(User).where(User.last_seen >= since)
             )
-            downloads = await session.scalar(select(func.count()).select_from(DownloadHistory)
-                                             .where(DownloadHistory.status == "success"))
+            downloads = await session.scalar(
+                select(func.count()).select_from(DeliveryReceipt)
+            )
             cached = await session.scalar(select(func.count()).select_from(DownloadHistory)
                                           .where(DownloadHistory.cache_hit.is_(True)))
         return int(users or 0), int(active or 0), int(downloads or 0), int(cached or 0)
