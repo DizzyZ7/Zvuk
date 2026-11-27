@@ -73,32 +73,30 @@ async def dispatch_download(
         return status
     assert job_id is not None
     try:
-        # Clip jobs are handled by the worker as two linked artifacts; there
-        # is no single cached Telegram file_id for the combined result.
-        if kind == "clip":
-            await enqueue_download(redis, job_id)
-            await bot.send_message(
-                chat_id,
-                "🎬 Ссылка принята. Пришлю видео и следом MP3 со звуком из него.",
-            )
-            return "queued"
-        cached = await repo.cache_get(key)
-        if cached:
-            placement = await ads.placement(user_id)
-            try:
-                if kind in AUDIO_KINDS:
-                    await bot.send_audio(chat_id, audio=cached, caption=placement.caption)
+        if kind != "clip":
+            # Clip jobs have two output file IDs and are handled by the worker.
+            cached = await repo.cache_get(key)
+            if cached:
+                placement = await ads.placement(user_id)
+                try:
+                    if kind in AUDIO_KINDS:
+                        await bot.send_audio(
+                            chat_id, audio=cached, caption=placement.caption,
+                        )
+                    else:
+                        await bot.send_video(
+                            chat_id, video=cached, caption=placement.caption,
+                        )
+                except TelegramBadRequest as exc:
+                    if ("wrong file" in str(exc).lower()
+                            or "invalid file" in str(exc).lower()):
+                        await repo.cache_drop(key)
+                    else:
+                        raise
                 else:
-                    await bot.send_video(chat_id, video=cached, caption=placement.caption)
-            except TelegramBadRequest as exc:
-                if "wrong file" in str(exc).lower() or "invalid file" in str(exc).lower():
-                    await repo.cache_drop(key)
-                else:
-                    raise
-            else:
-                await repo.update_download(job_id, "success", cache_hit=True)
-                await ads.delivered(placement)
-                return "cached"
+                    await repo.update_download(job_id, "success", cache_hit=True)
+                    await ads.delivered(placement)
+                    return "cached"
         await enqueue_download(redis, job_id)
     except Exception:
         # The reservation must never become an orphaned queued row.
@@ -107,9 +105,14 @@ async def dispatch_download(
             job_id, "failed", "Не удалось подготовить загрузку",
         )
         raise
-    await bot.send_message(chat_id, "⏳ В очереди. Отправлю файл, когда он будет готов.")
+    # User-facing acknowledgements must not invalidate an already queued job.
+    await bot.send_message(
+        chat_id,
+        ("🎬 Ссылка принята. Пришлю видео и следом MP3 со звуком из него."
+         if kind == "clip" else
+         "⏳ В очереди. Отправлю файл, когда он будет готов."),
+    )
     return "queued"
-
 
 def download_status_message(status: str, settings: Settings) -> str:
     if status == "downloaded":
@@ -162,7 +165,10 @@ async def handle_link(
         return
     await users.register(message.from_user)
     matched_link = LINK_RE.search(message.text)
-    short_label = short_video_label(matched_link.group(0)) if matched_link else None
+    short_label = (
+        short_video_label(matched_link.group(0).rstrip(".,;!?)»"))
+        if matched_link else None
+    )
     if short_label in {"YouTube Shorts", "Instagram Reels", "TikTok"}:
         # These short-form links always deliver BOTH outputs, no format chooser.
         await dispatch_download(
