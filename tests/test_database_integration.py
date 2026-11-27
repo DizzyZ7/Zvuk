@@ -232,3 +232,65 @@ async def test_one_users_success_does_not_block_another_users_first_file():
     assert status == "reserved"
     await repo.update_download(job, "success")
     assert (await repo.reserve_download(other, media.url, key, "audio", 5))[0] == "reserved"
+
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_clip_one_reservation_and_two_independent_delivery_markers():
+    from app.services.urls import cache_key
+
+    uid = 10_000_000_012
+    async with session_factory.begin() as session:
+        session.add(User(id=uid))
+    repo = Repository(session_factory, redis=None)
+    media = parse_media_url(
+        "https://www.instagram.com/reel/DgLOE34yzwp/?lqvp=tracking",
+    )
+    ck = cache_key(media, "clip")
+    vk = cache_key(media, "video")
+    ak = cache_key(media, "audio")
+    status, jid = await repo.reserve_clip_download(
+        uid, media.url, ck, vk, ak, 5,
+    )
+    assert status == "reserved" and jid
+    assert await repo.reserve_clip_download(
+        uid, media.url, ck, vk, ak, 5,
+    ) == ("pending", None)
+
+    await repo.update_download(jid, "processing")
+    await repo.record_delivered_output(uid, media.url, vk, "video")
+    assert await repo.download_states(uid, [vk, ak]) == {vk: "success"}
+    await repo.update_download(jid, "failed", "MP3 conversion failure")
+
+    # The video remains marked delivered, and the entire clip can be retried.
+    status, retry_id = await repo.reserve_clip_download(
+        uid, media.url, ck, vk, ak, 5,
+    )
+    assert status == "reserved" and retry_id != jid
+    await repo.update_download(retry_id, "processing")
+    await repo.record_delivered_output(uid, media.url, ak, "audio")
+    assert await repo.download_states(uid, [vk, ak]) == {
+        vk: "success", ak: "success",
+    }
+    await repo.update_download(retry_id, "success")
+    assert await repo.reserve_clip_download(
+        uid, media.url, ck, vk, ak, 5,
+    ) == ("downloaded", None)
+
+
+@pytest.mark.asyncio(loop_scope="module")
+async def test_existing_video_and_audio_individually_prevent_clip_redelivery():
+    from app.services.urls import cache_key
+
+    uid = 10_000_000_013
+    async with session_factory.begin() as session:
+        session.add(User(id=uid))
+    repo = Repository(session_factory, redis=None)
+    media = parse_media_url("https://www.youtube.com/shorts/dQw4w9WgXcQ")
+    vk, ak, ck = (cache_key(media, kind)
+                  for kind in ("video", "audio", "clip"))
+    await repo.record_delivered_output(uid, media.url, vk, "video")
+    await repo.record_delivered_output(uid, media.url, ak, "audio")
+    assert await repo.reserve_clip_download(
+        uid, media.url, ck, vk, ak, 5,
+    ) == ("downloaded", None)
