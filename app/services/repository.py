@@ -445,7 +445,8 @@ class Repository:
                         DownloadHistory.status == "queued",
                         and_(
                             DownloadHistory.status == "processing",
-                            DownloadHistory.lease_until < now,
+                            or_(DownloadHistory.lease_until.is_(None),
+                                DownloadHistory.lease_until < now),
                         ),
                     ))
                     .order_by(DownloadHistory.created_at, DownloadHistory.id)
@@ -461,7 +462,8 @@ class Repository:
                         Broadcast.status == "queued",
                         and_(
                             Broadcast.status == "running",
-                            Broadcast.lease_until < now,
+                            or_(Broadcast.lease_until.is_(None),
+                                Broadcast.lease_until < now),
                         ),
                     ))
                     .order_by(Broadcast.created_at, Broadcast.id)
