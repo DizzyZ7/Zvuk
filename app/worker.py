@@ -10,20 +10,17 @@ from aiogram.exceptions import (
     TelegramNetworkError, TelegramRetryAfter, TelegramServerError,
 )
 from aiogram.types import FSInputFile
-from redis.asyncio import Redis
-from redis.exceptions import RedisError
 from sqlalchemy.exc import SQLAlchemyError
 from app.bot.keyboards import broadcast_stop_keyboard
 from app.core.config import settings
 from app.core.database import engine, session_factory
-from app.core.redis import make_redis
+from app.core.state import StateStore
 from app.core.telegram import make_bot
 from app.services.ad_manager import AdManager
 from app.services.housekeeping import prune_orphaned_workdirs
 from app.services.media_downloader import AUDIO_KINDS, DownloadedMedia, MediaDownloadError, MediaDownloader
 from app.services.queue import (
-    BROADCAST_STREAM, DOWNLOAD_STREAM, GROUP, STALE_AFTER_MS, acknowledge,
-    ensure_groups, keep_pending_alive, release_lock,
+    BROADCAST_STREAM, DOWNLOAD_STREAM, listen_for_jobs, release_lock,
 )
 from app.services.repository import Repository
 from app.services.urls import cache_key, parse_media_url
@@ -32,7 +29,7 @@ log = logging.getLogger(__name__)
 MAX_TRANSIENT_RETRIES = 3
 
 class Worker:
-    def __init__(self, bot: Bot, redis: Redis, repo: Repository):
+    def __init__(self, bot: Bot, redis: StateStore, repo: Repository):
         self.bot = bot
         self.redis = redis
         self.repo = repo
@@ -286,11 +283,11 @@ class Worker:
             await self.repo.update_download(job_id, "failed", error=error)
             await self.notify_failure(job.user_id, error)
         except (
-            RedisError, SQLAlchemyError, TelegramNetworkError,
+            SQLAlchemyError, TelegramNetworkError,
             TelegramServerError, TelegramRetryAfter,
         ) as exc:
-            # Leave the message in the Redis pending list for XAUTOCLAIM.
-            # Do not permanently fail a user job due to short infrastructure outages.
+            # Leave leased SQL job in processing for crash-safe recovery.
+            # Do not permanently fail a job due to transient infrastructure outages.
             attempt = await self.repo.record_download_retry(job_id)
             if attempt <= MAX_TRANSIENT_RETRIES:
                 log.warning(
@@ -406,56 +403,92 @@ class Worker:
         except TelegramBadRequest:
             pass
 
-    async def consume(self, stream: str, concurrency_id: int) -> None:
-        consumer = f"{self.consumer}-{concurrency_id}"
+    async def _keep_lease_alive(self, stream: str, job_id: str) -> None:
         while True:
+            await asyncio.sleep(90)
             try:
-                # Reclaim abandoned jobs after 3 minutes; live jobs renew PEL every 45s.
-                stale = await self.redis.xautoclaim(
-                    stream, GROUP, consumer, min_idle_time=STALE_AFTER_MS,
-                    start_id="0-0", count=1,
-                )
-                messages = stale[1] if len(stale) > 1 else []
-                if not messages:
-                    entries = await self.redis.xreadgroup(
-                        GROUP, consumer, {stream: ">"}, count=1, block=3000,
-                    )
-                    messages = entries[0][1] if entries else []
-                for event_id, payload in messages:
-                    job_id = payload.get("job_id")
-                    if not job_id:
-                        await acknowledge(self.redis, stream, event_id)
-                        continue
-                    try:
-                        async with keep_pending_alive(self.redis, stream, consumer, event_id):
-                            if stream == DOWNLOAD_STREAM:
-                                await self.process_download(job_id)
-                            else:
-                                await self.process_broadcast(job_id)
-                    except Exception:
-                        # Do not ACK infrastructure failures; reclaim after timeout.
-                        log.exception("Worker crashed handling %s %s", stream, job_id)
-                    else:
-                        await acknowledge(self.redis, stream, event_id)
+                await self.repo.renew_job_lease(stream, job_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
-                log.exception("Queue consumer error")
-                await asyncio.sleep(3)
+                log.exception("Could not renew SQL lease %s/%s", stream, job_id)
+
+    async def _run_claimed(self, stream: str, job_id: str) -> None:
+        renewal = asyncio.create_task(
+            self._keep_lease_alive(stream, job_id),
+            name=f"sql-lease:{job_id}",
+        )
+        try:
+            if stream == DOWNLOAD_STREAM:
+                await self.process_download(job_id)
+            else:
+                await self.process_broadcast(job_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # A transient error leaves the processing row with a lease.
+            # It becomes claimable again when the lease expires.
+            log.exception("Failed to process SQL job %s", job_id)
+        finally:
+            renewal.cancel()
+            try:
+                await renewal
+            except asyncio.CancelledError:
+                pass
+
+    async def consume(self, stream: str, concurrency_id: int) -> None:
+        """Listen for new SQL jobs, processing durable rows with SKIP LOCKED.
+
+        No idle three-second poll. LISTEN/NOTIFY wakes us immediately, while
+        a 10-minute safety wake checks for missed notifications and expired
+        leases. Startup and reconnect always drain the queue first.
+        """
+        while True:
+            wake = asyncio.Event()
+            try:
+                async with listen_for_jobs(wake) as conn:
+                    log.info("PostgreSQL LISTEN subscribed stream=%s consumer=%s",
+                             stream, concurrency_id)
+                    while True:
+                        wake.clear()
+                        while job_id := await self.repo.claim_next_job(stream):
+                            await self._run_claimed(stream, job_id)
+                        try:
+                            await asyncio.wait_for(wake.wait(), timeout=600)
+                        except TimeoutError:
+                            # Rare recovery after a worker crash or missed notify.
+                            pass
+                        if conn.is_closed():
+                            raise ConnectionError("PostgreSQL notification connection closed")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("PostgreSQL worker listener disconnected")
+                await asyncio.sleep(5)
 
     async def heartbeat(self) -> None:
         key = f"zvuk:worker:alive:{self.consumer}"
         while True:
             try:
-                await self.redis.set(key, "1", ex=40)
-            except RedisError:
+                await self.redis.set(key, "1", ex=360)
+            except SQLAlchemyError:
                 log.warning("Unable to publish worker heartbeat")
-            await asyncio.sleep(15)
+            await asyncio.sleep(120)
+
+    async def maintenance(self) -> None:
+        """Minimal maintenance; compact delivery receipts survive cleanup."""
+        while True:
+            try:
+                await self.redis.prune_expired()
+                await self.repo.cleanup_history(older_than_days=30)
+            except SQLAlchemyError:
+                log.exception("PostgreSQL housekeeping failed")
+            await asyncio.sleep(86400)
 
     async def run(self) -> None:
-        await ensure_groups(self.redis)
         async with asyncio.TaskGroup() as group:
             group.create_task(self.heartbeat())
+            group.create_task(self.maintenance())
             for index in range(settings.worker_concurrency):
                 group.create_task(self.consume(DOWNLOAD_STREAM, index))
             group.create_task(self.consume(BROADCAST_STREAM, 99))
@@ -463,19 +496,19 @@ class Worker:
 async def main() -> None:
     logging.basicConfig(level=settings.log_level.upper(),
                         format="%(asctime)s %(levelname)s %(name)s %(message)s")
-    redis = make_redis()
+    state = StateStore(session_factory)
     bot = make_bot()
     try:
-        await redis.ping()
+        await state.ping()
         removed = await asyncio.to_thread(prune_orphaned_workdirs, Path("/shared"))
         if removed:
             log.info("Cleaned %s stale media work directories", removed)
-        worker = Worker(bot, redis, Repository(session_factory, redis))
+        worker = Worker(bot, state, Repository(session_factory, state))
         await worker.run()
     finally:
         await bot.session.close()
-        await redis.aclose()
         await engine.dispose()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

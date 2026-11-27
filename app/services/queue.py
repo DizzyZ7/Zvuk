@@ -4,7 +4,6 @@ NOTIFY is only a hint, not the durable queue. A worker drains rows after
 connecting and periodically checks for orphaned leases.
 """
 import asyncio
-import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
@@ -16,9 +15,6 @@ from app.core.state import StateStore
 DOWNLOAD_STREAM = "download"
 BROADCAST_STREAM = "broadcast"
 CHANNEL = "zvuk_jobs"
-
-log = logging.getLogger(__name__)
-
 
 def asyncpg_dsn() -> str:
     return settings.database_url.replace(
@@ -40,7 +36,8 @@ async def release_lock(store: StateStore, key: str, token: str) -> None:
     await store.release_lock(key, token)
 
 
-async def listen_for_jobs(signal: asyncio.Event) -> AsyncIterator[None]:
+@asynccontextmanager
+async def listen_for_jobs(signal: asyncio.Event) -> AsyncIterator[asyncpg.Connection]:
     """Reconnect when needed; caller checks the database on every reconnect."""
     connection = await asyncpg.connect(dsn=asyncpg_dsn())
 
@@ -49,6 +46,6 @@ async def listen_for_jobs(signal: asyncio.Event) -> AsyncIterator[None]:
 
     try:
         await connection.add_listener(CHANNEL, on_notify)
-        yield
+        yield connection
     finally:
         await connection.close()
